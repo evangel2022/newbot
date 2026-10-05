@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
@@ -124,3 +125,62 @@ def test_cli_runs_a_tool_end_to_end(
     captured = capsys.readouterr()
     assert code == 0
     assert captured.out == "The note says payload-42\n"
+
+
+def test_cli_interactive_runs_a_turn_per_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    provider = ScriptedProvider(
+        [
+            Message(role=Role.ASSISTANT, content="first reply"),
+            Message(role=Role.ASSISTANT, content="second reply"),
+        ]
+    )
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: provider,
+        stdin=io.StringIO("first question\nsecond question\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "first reply" in captured.out
+    assert "second reply" in captured.out
+    assert [message.content for message in provider.requests[1].messages] == [
+        "first question",
+        "first reply",
+        "second question",
+    ]
+
+
+def test_cli_interactive_exit_command_stops_without_a_turn(tmp_path: Path) -> None:
+    config = _write_config(tmp_path)
+    provider = FakeProvider(reply_events("unused"))
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: provider,
+        stdin=io.StringIO("/exit\n"),
+    )
+
+    assert code == 0
+    assert provider.requests == []
+
+
+class _InterruptingStdin:
+    def readline(self) -> str:
+        raise KeyboardInterrupt
+
+
+def test_cli_interactive_keyboard_interrupt_exits_130(tmp_path: Path) -> None:
+    config = _write_config(tmp_path)
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: FakeProvider(reply_events("unused")),
+        stdin=_InterruptingStdin(),
+    )
+
+    assert code == 130
