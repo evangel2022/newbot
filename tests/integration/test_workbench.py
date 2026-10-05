@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -92,7 +93,7 @@ async def test_workbench_negotiates_capabilities_and_answers_a_turn(
 
     assert health.status_code == 200
     assert capabilities.status_code == 200
-    assert capabilities.json() == {"protocol": 1, "capabilities": ["chat"]}
+    assert capabilities.json() == {"protocol": 1, "capabilities": ["chat", "stream"]}
     assert unauthorized.status_code == 401
     assert reply.status_code == 200
     assert reply.json() == {"reply": "pong"}
@@ -164,6 +165,54 @@ async def test_workbench_correlates_concurrent_turns_per_conversation(
         "first",
         "second",
     ]
+
+
+async def test_workbench_streams_deltas_over_websocket(tmp_path: Path) -> None:
+    websockets = pytest.importorskip("websockets")
+    stdout = io.StringIO()
+    task = _serve(_settings(tmp_path, token=_TOKEN), stdout)
+    frames: list[dict[str, object]] = []
+    try:
+        url = await _wait_for_url(stdout)
+        uri = url.replace("http://", "ws://", 1) + "/stream?conversation=shared"
+        async with websockets.connect(
+            uri,
+            additional_headers={"Authorization": f"Bearer {_TOKEN}"},
+            proxy=None,
+        ) as socket:
+            await socket.send(json.dumps({"text": "hi", "protocol": 1}))
+            async for message in socket:
+                frame = json.loads(message)
+                frames.append(frame)
+                if frame["type"] in {"done", "error"}:
+                    break
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert frames == [
+        {"type": "started"},
+        {"type": "delta", "text": "pong"},
+        {"type": "done", "status": "completed"},
+    ]
+
+
+async def test_workbench_refuses_a_stream_without_a_token(tmp_path: Path) -> None:
+    websockets = pytest.importorskip("websockets")
+    invalid_status = pytest.importorskip("websockets.exceptions").InvalidStatus
+    stdout = io.StringIO()
+    task = _serve(_settings(tmp_path, token=None), stdout)
+    try:
+        url = await _wait_for_url(stdout)
+        uri = url.replace("http://", "ws://", 1) + "/stream"
+        with pytest.raises(invalid_status):
+            async with websockets.connect(uri, proxy=None):
+                pass
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def _wait_for_url(stdout: io.StringIO, *, timeout: float = 5.0) -> str:

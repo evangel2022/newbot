@@ -15,5 +15,7 @@ new ADR that supersedes the old one.
 | [ADR-007](ADR-007-security.md) | Boundary guards: workspace, network, sandbox, access | Accepted |
 | [ADR-008](ADR-008-extension.md) | Extension points at the edges | Accepted |
 | [ADR-009](ADR-009-testing.md) | Test by surface, protect real contracts | Accepted |
+| [ADR-010](ADR-010-workbench-transport.md) | Workbench transport protocol | Accepted |
+| [ADR-011](ADR-011-workbench-streaming.md) | Workbench streaming capability | Accepted |
 
 Normative source: [../ARCHITECTURE.md](../ARCHITECTURE.md).

@@ -269,7 +269,7 @@ Rules:
 | --- | --- |
 | `newbot run -m "..."` | One-shot turn; prints the reply; exits. |
 | `newbot` (no args) | Interactive terminal session with persistent history. |
-| `newbot serve` | Long-running host: scheduler + curator + loopback workbench transport (HTTP health/capabilities and authed `POST /messages`; `server.port`, `server.token`; ADR-010). |
+| `newbot serve` | Long-running host: scheduler + curator + loopback workbench transport (HTTP health/capabilities, authed `POST /messages`, and a `stream` capability over WebSocket; `server.port`, `server.token`; ADR-010, ADR-011). |
 | `newbot init` | Create config/workspace defaults (never recovers from an invalid file). |
 
 ### 6.2 Turn lifecycle
@@ -773,7 +773,7 @@ Format: **Responsibility / Input / Output / State / Depends on / Forbidden.**
    file-curated. Deferred; memory remains the architectural center either way.
 2. **Multi-agent topology.** Whether collaborative topologies beyond parent/child delegation are
    needed, or delegation is sufficient.
-3. **Workbench transport protocol.** The exact capability-negotiation format for the HTTP/WS
-   transport (see §3.5, R1–R2), to be fixed in an implementation-phase ADR.
+3. **Workbench transport protocol.** Resolved: the capability-negotiation and streaming formats
+   are fixed in ADR-010 (HTTP surface) and ADR-011 (streaming capability).
 4. **Sandbox backends per OS.** Which OS sandbox backends ship by default, given fail-closed
    behavior on Windows.

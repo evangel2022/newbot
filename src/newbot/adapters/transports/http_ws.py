@@ -1,26 +1,47 @@
-"""Loopback HTTP workbench: health, capability negotiation, and turn submission."""
+"""Loopback HTTP workbench: health, capability negotiation, turns, and streaming."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import http.server
+import io
 import json
+import queue
+import select
+import socket
 import threading
+from collections.abc import Mapping
+from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from newbot.adapters.transports.websocket import (
+    WebSocketConnection,
+    WebSocketError,
+    accept_key,
+)
 from newbot.domain.envelope import InboundEnvelope, OutboundEnvelope
 from newbot.domain.errors import TransportError
-from newbot.domain.events import AgentEvent, TurnCompleted, TurnFailed
+from newbot.domain.events import (
+    AgentEvent,
+    ResponseDelta,
+    TurnCompleted,
+    TurnFailed,
+    TurnStarted,
+)
 from newbot.policy.access import AccessPolicy
 from newbot.ports.transports import InboundHandler
 
 WORKBENCH_PROTOCOL = 1
 WORKBENCH_TRANSPORT_ID = "webui"
-CAPABILITIES: tuple[str, ...] = ("chat",)
+CAPABILITIES: tuple[str, ...] = ("chat", "stream")
 
 _LOOPBACK = "127.0.0.1"
 _REPLY_TIMEOUT = 120.0
+_STREAM_PATH = "/stream"
+_STREAM_POLL_SECONDS = 0.05
+_MAX_CONVERSATION_CHARS = 200
 
 
 class _MessageRequest(BaseModel):
@@ -28,18 +49,40 @@ class _MessageRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    conversation: str = Field(default="default", min_length=1)
+    conversation: str = Field(
+        default="default", min_length=1, max_length=_MAX_CONVERSATION_CHARS
+    )
     text: str = Field(min_length=1)
     protocol: int = WORKBENCH_PROTOCOL
     capabilities: list[str] = Field(default_factory=list)
 
 
+class _StreamRequest(BaseModel):
+    """One inbound WebSocket text message, validated at the transport boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+    protocol: int = WORKBENCH_PROTOCOL
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     """Thin HTTP shim; every decision belongs to the workbench."""
 
+    protocol_version = "HTTP/1.1"
     server: _HttpServer
 
     def do_GET(self) -> None:
+        headers = {name.lower(): value for name, value in self.headers.items()}
+        if self.path.split("?", 1)[0] == _STREAM_PATH:
+            self.close_connection = True
+            outcome = self.server.workbench.stream(
+                headers, self.rfile, self.wfile, self.connection, self.path
+            )
+            if outcome is not None:
+                status, payload = outcome
+                self._respond(status, payload)
+            return
         status, payload = self.server.workbench.get(self.path)
         self._respond(status, payload)
 
@@ -99,6 +142,8 @@ class WorkbenchServer:
         self._submit = submit
         self._pending: dict[str, asyncio.Future[str]] = {}
         self._turns: dict[str, asyncio.Lock] = {}
+        self._streams: dict[str, queue.Queue[str]] = {}
+        self._stopped = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: _HttpServer | None = None
         self._thread: threading.Thread | None = None
@@ -117,6 +162,7 @@ class WorkbenchServer:
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind the loopback socket and serve it from a background thread."""
+        self._stopped.clear()
         try:
             server = _HttpServer((_LOOPBACK, self._requested_port), self)
         except OSError as exc:
@@ -131,6 +177,7 @@ class WorkbenchServer:
 
     def stop(self) -> None:
         """Stop serving and release the socket."""
+        self._stopped.set()
         server, thread = self._server, self._thread
         if server is None or thread is None:
             return
@@ -184,13 +231,135 @@ class WorkbenchServer:
         self._resolve(envelope.conversation_id, envelope.text)
 
     async def publish(self, event: AgentEvent) -> None:
-        """Resolve or fail the pending request at the turn boundary."""
+        """Resolve the pending request and forward the event to any stream."""
         if event.session.transport != self.transport_id:
             return
-        if isinstance(event, TurnFailed):
-            self._fail(event.session.conversation, TransportError(event.message))
+        conversation = event.session.conversation
+        if isinstance(event, TurnStarted):
+            self._push(conversation, {"type": "started"})
+        elif isinstance(event, ResponseDelta):
+            self._push(conversation, {"type": "delta", "text": event.text})
+        elif isinstance(event, TurnFailed):
+            self._push(conversation, {"type": "error", "message": event.message})
+            self._fail(conversation, TransportError(event.message))
         elif isinstance(event, TurnCompleted):
-            self._resolve(event.session.conversation, "")
+            self._push(conversation, {"type": "done", "status": event.status.value})
+            self._resolve(conversation, "")
+
+    def stream(
+        self,
+        headers: Mapping[str, str],
+        reader: io.BufferedIOBase,
+        writer: io.BufferedIOBase,
+        sock: socket.socket,
+        path: str,
+    ) -> tuple[int, dict[str, object]] | None:
+        """Serve one streaming connection; ``None`` means the upgrade happened.
+
+        A non-``None`` result is an HTTP ``(status, payload)`` pair for the
+        handler to write because the upgrade was refused.
+        """
+        refusal = self._upgrade_refusal(headers)
+        if refusal is not None:
+            return refusal
+        conversation = _conversation_from(path)
+        if conversation is None:
+            return 400, {"error": "invalid conversation"}
+        handshake = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept_key(headers['sec-websocket-key'])}\r\n"
+            "\r\n"
+        )
+        writer.write(handshake.encode("ascii"))
+        writer.flush()
+        connection = WebSocketConnection(reader, writer)
+        pending: queue.Queue[str] = queue.Queue()
+        self._streams[conversation] = pending
+        try:
+            self._pump(connection, conversation, pending, sock)
+        except WebSocketError as exc:
+            with contextlib.suppress(OSError):
+                connection.close(exc.code, exc.reason)
+        except OSError:
+            pass
+        finally:
+            if self._streams.get(conversation) is pending:
+                del self._streams[conversation]
+        return None
+
+    def _upgrade_refusal(
+        self, headers: Mapping[str, str]
+    ) -> tuple[int, dict[str, object]] | None:
+        if not self._access.mutating_enabled:
+            return 403, {"error": "mutations are disabled"}
+        if not self._access.allows(headers.get("authorization")):
+            return 401, {"error": "unauthorized"}
+        if headers.get("upgrade", "").lower() != "websocket":
+            return 400, {"error": "expected a websocket upgrade"}
+        if "upgrade" not in headers.get("connection", "").lower():
+            return 400, {"error": "expected a websocket upgrade"}
+        if headers.get("sec-websocket-version") != "13":
+            return 400, {"error": "unsupported websocket version"}
+        if not headers.get("sec-websocket-key"):
+            return 400, {"error": "missing websocket key"}
+        return None
+
+    def _pump(
+        self,
+        connection: WebSocketConnection,
+        conversation: str,
+        pending: queue.Queue[str],
+        sock: socket.socket,
+    ) -> None:
+        while not self._stopped.is_set():
+            readable, _, _ = select.select([sock], [], [], _STREAM_POLL_SECONDS)
+            if readable:
+                message = connection.receive_text()
+                if message is None:
+                    return
+                self._accept(connection, conversation, message)
+            self._flush(connection, pending)
+
+    def _flush(self, connection: WebSocketConnection, pending: queue.Queue[str]) -> None:
+        while True:
+            try:
+                frame = pending.get_nowait()
+            except queue.Empty:
+                return
+            connection.send_text(frame)
+
+    def _accept(
+        self, connection: WebSocketConnection, conversation: str, message: str
+    ) -> None:
+        try:
+            request = _StreamRequest.model_validate_json(message)
+        except ValidationError:
+            connection.send_text(_error_frame("invalid message request"))
+            return
+        if request.protocol != WORKBENCH_PROTOCOL:
+            connection.send_text(_error_frame(f"unsupported protocol {request.protocol}"))
+            return
+        loop = self._loop
+        if loop is None:
+            connection.send_text(_error_frame("stream is not running"))
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._submit(
+                InboundEnvelope(
+                    transport=self.transport_id,
+                    conversation_id=conversation,
+                    text=request.text,
+                )
+            ),
+            loop,
+        )
+
+    def _push(self, conversation: str, frame: dict[str, object]) -> None:
+        pending = self._streams.get(conversation)
+        if pending is not None:
+            pending.put(json.dumps(frame))
 
     async def _run(self, conversation: str, text: str) -> str:
         # The engine already runs one turn per session; this lock is what
@@ -226,3 +395,15 @@ class WorkbenchServer:
         future = self._pending.get(conversation)
         if future is not None and not future.done():
             future.set_exception(error)
+
+
+def _error_frame(message: str) -> str:
+    return json.dumps({"type": "error", "message": message})
+
+
+def _conversation_from(path: str) -> str | None:
+    values = parse_qs(urlsplit(path).query).get("conversation", ["default"])
+    conversation = values[0]
+    if not conversation or len(conversation) > _MAX_CONVERSATION_CHARS:
+        return None
+    return conversation
