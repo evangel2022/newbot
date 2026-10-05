@@ -39,3 +39,7 @@ class SessionError(NewbotError):
 
 class JournalError(NewbotError):
     """A consolidated journal entry could not be read, normalized, or written."""
+
+
+class VersionError(NewbotError):
+    """A durable-file version could not be recorded, read, or restored."""
