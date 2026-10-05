@@ -24,6 +24,12 @@ class SessionStorePort(Protocol):
         """Append records durably, never truncating the live file in place."""
         ...
 
+    async def rewrite(
+        self, workspace_id: str, key: SessionKey, records: Sequence[SessionRecord]
+    ) -> None:
+        """Atomically replace every stored record for the session."""
+        ...
+
 
 class SessionServicePort(Protocol):
     """The bounded session history and recording the core depends on."""
@@ -34,4 +40,12 @@ class SessionServicePort(Protocol):
 
     async def record(self, key: SessionKey, messages: Sequence[Message]) -> None:
         """Persist messages as part of a completed turn."""
+        ...
+
+
+class SummarizerPort(Protocol):
+    """Condenses a run of messages into a checkpoint summary."""
+
+    async def summarize(self, messages: Sequence[Message]) -> str:
+        """Return one summary covering ``messages`` (oldest first)."""
         ...

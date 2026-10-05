@@ -214,3 +214,53 @@ def test_cli_init_defaults_to_the_config_directory(
     assert code == 0
     assert (tmp_path / "cfg" / "config.toml").is_file()
     assert (tmp_path / "cfg" / "workspace").is_dir()
+
+
+def test_cli_compact_reports_nothing_to_compact_for_an_empty_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    provider = FakeProvider(reply_events("unused"))
+
+    code = main(
+        ["compact", "--config", str(config)],
+        provider_factory=lambda _settings: provider,
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == "nothing to compact\n"
+    assert provider.requests == []
+
+
+def test_cli_compact_folds_a_recorded_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    main(
+        ["run", "-m", "hello", "--config", str(config)],
+        provider_factory=lambda _settings: ScriptedProvider(
+            [Message(role=Role.ASSISTANT, content="hi there")]
+        ),
+    )
+    capsys.readouterr()
+    summarizer = ScriptedProvider([Message(role=Role.ASSISTANT, content="brief")])
+
+    code = main(
+        ["compact", "--keep-recent", "1", "--config", str(config)],
+        provider_factory=lambda _settings: summarizer,
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == "compacted\n"
+    assert [message.content for message in summarizer.requests[0].messages] == ["hello"]
+
+
+def test_cli_compact_rejects_negative_keep_recent(tmp_path: Path) -> None:
+    result = _run_cli(
+        "compact", "--keep-recent", "-1", "--config", str(_write_config(tmp_path))
+    )
+
+    assert result.returncode == 2
+    assert "must be zero or greater" in result.stderr

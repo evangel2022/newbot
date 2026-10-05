@@ -12,13 +12,23 @@ from typing import TextIO
 
 from newbot import __version__
 from newbot.adapters.providers.registry import ProviderFactory, build_provider
-from newbot.app.lifecycle import run_interactive, run_once
+from newbot.app.lifecycle import run_compact, run_interactive, run_once
 from newbot.config.init import InitOutcome, initialize
 from newbot.config.loader import load_settings
 from newbot.config.paths import config_path
 from newbot.domain.errors import ConfigLoadError, NewbotError
 
 _CONFIG_HELP = "path to config.toml"
+
+
+def _non_negative(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return number
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -42,6 +52,18 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--workspace", type=Path, default=None, help="agent workspace directory"
     )
+    compact = subparsers.add_parser(
+        "compact", help="summarize a session's older history"
+    )
+    compact.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
+    compact.add_argument(
+        "--keep-recent",
+        type=_non_negative,
+        default=8,
+        help="recent messages to keep verbatim",
+    )
     return parser
 
 
@@ -51,7 +73,7 @@ def main(
     provider_factory: ProviderFactory = build_provider,
     stdin: TextIO | None = None,
 ) -> int:
-    """Parse arguments and run one turn or an interactive session."""
+    """Parse arguments and dispatch to the requested command."""
     _configure_console()
     args = _build_parser().parse_args(argv)
     if args.command == "init":
@@ -68,6 +90,14 @@ def main(
         if args.command == "run":
             return asyncio.run(
                 run_once(settings, str(args.message), provider_factory=provider_factory)
+            )
+        if args.command == "compact":
+            return asyncio.run(
+                run_compact(
+                    settings,
+                    keep_recent=args.keep_recent,
+                    provider_factory=provider_factory,
+                )
             )
         return asyncio.run(
             run_interactive(

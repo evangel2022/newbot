@@ -172,3 +172,20 @@ class MemorySessionStore:
             (workspace_id, key.transport, key.conversation), []
         )
         bucket.extend(records)
+
+    async def rewrite(
+        self, workspace_id: str, key: SessionKey, records: Sequence[SessionRecord]
+    ) -> None:
+        self.records[(workspace_id, key.transport, key.conversation)] = list(records)
+
+
+class FakeSummarizer:
+    """A ``SummarizerPort`` stub that records its input and returns one summary."""
+
+    def __init__(self, summary: str = "summary") -> None:
+        self._summary = summary
+        self.inputs: list[tuple[Message, ...]] = []
+
+    async def summarize(self, messages: Sequence[Message]) -> str:
+        self.inputs.append(tuple(messages))
+        return self._summary

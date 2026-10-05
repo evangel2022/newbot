@@ -11,12 +11,18 @@ import tempfile
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from newbot.domain.errors import SessionError
 from newbot.domain.message import Message, Role
-from newbot.domain.session import SessionKey, SessionRecord
+from newbot.domain.session import (
+    CheckpointRecord,
+    MessageRecord,
+    SessionKey,
+    SessionRecord,
+)
 from newbot.domain.tool import ToolCall
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -40,11 +46,20 @@ class _WireMessage(BaseModel):
     tool_call_id: str | None = None
 
 
-class _WireRecord(BaseModel):
+class _WireMessageRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    type: Literal["message"] = "message"
     timestamp: datetime
     message: _WireMessage
+
+
+class _WireCheckpointRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["checkpoint"]
+    timestamp: datetime
+    summary: str
 
 
 class JsonlSessionStore:
@@ -92,6 +107,20 @@ class JsonlSessionStore:
         except OSError as exc:
             raise SessionError(f"cannot write session file {path.name}: {exc}") from exc
 
+    async def rewrite(
+        self, workspace_id: str, key: SessionKey, records: Sequence[SessionRecord]
+    ) -> None:
+        await asyncio.to_thread(self._rewrite, workspace_id, key, tuple(records))
+
+    def _rewrite(
+        self, workspace_id: str, key: SessionKey, records: Sequence[SessionRecord]
+    ) -> None:
+        path = self._path(workspace_id, key)
+        try:
+            _atomic_write_lines(path, [_serialize_record(record) for record in records])
+        except OSError as exc:
+            raise SessionError(f"cannot write session file {path.name}: {exc}") from exc
+
     def _path(self, workspace_id: str, key: SessionKey) -> Path:
         workspace_dir = self._base / _slugged("ws", workspace_id)
         label = f"{key.transport}\x1f{key.conversation}"
@@ -100,36 +129,70 @@ class JsonlSessionStore:
 
 def _parse_record(line: str, filename: str, number: int) -> SessionRecord:
     try:
-        wire = _WireRecord.model_validate_json(line)
-    except (ValidationError, ValueError) as exc:
-        raise SessionError(f"invalid record in {filename} line {number}: {exc}") from exc
-    message = Message(
-        role=wire.message.role,
-        content=wire.message.content,
+        payload = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise _invalid_record(filename, number, exc) from exc
+    if not isinstance(payload, dict):
+        raise _invalid_record(filename, number, "record must be a JSON object")
+    kind = payload.get("type", "message")
+    try:
+        if kind == "checkpoint":
+            checkpoint = _WireCheckpointRecord.model_validate(payload)
+            return CheckpointRecord(
+                timestamp=checkpoint.timestamp, summary=checkpoint.summary
+            )
+        if kind == "message":
+            wire = _WireMessageRecord.model_validate(payload)
+            return MessageRecord(
+                timestamp=wire.timestamp, message=_to_message(wire.message)
+            )
+    except ValidationError as exc:
+        raise _invalid_record(filename, number, exc) from exc
+    raise _invalid_record(filename, number, f"unknown record type {kind!r}")
+
+
+def _to_message(wire: _WireMessage) -> Message:
+    return Message(
+        role=wire.role,
+        content=wire.content,
         tool_calls=tuple(
             ToolCall(id=call.id, name=call.name, arguments=call.arguments)
-            for call in wire.message.tool_calls
+            for call in wire.tool_calls
         ),
-        tool_call_id=wire.message.tool_call_id,
+        tool_call_id=wire.tool_call_id,
     )
-    return SessionRecord(timestamp=wire.timestamp, message=message)
+
+
+def _invalid_record(filename: str, number: int, cause: object) -> SessionError:
+    return SessionError(f"invalid record in {filename} line {number}: {cause}")
 
 
 def _serialize_record(record: SessionRecord) -> str:
-    message: dict[str, object] = {
-        "role": record.message.role.value,
-        "content": record.message.content,
-    }
-    if record.message.tool_calls:
-        message["tool_calls"] = [
-            {"id": call.id, "name": call.name, "arguments": call.arguments}
-            for call in record.message.tool_calls
-        ]
-    if record.message.tool_call_id is not None:
-        message["tool_call_id"] = record.message.tool_call_id
-    payload: dict[str, object] = {"timestamp": record.timestamp, "message": message}
-    payload["timestamp"] = record.timestamp.isoformat()
+    if isinstance(record, CheckpointRecord):
+        payload: dict[str, object] = {
+            "type": "checkpoint",
+            "timestamp": record.timestamp.isoformat(),
+            "summary": record.summary,
+        }
+    else:
+        payload = {
+            "type": "message",
+            "timestamp": record.timestamp.isoformat(),
+            "message": _serialize_message(record.message),
+        }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _serialize_message(message: Message) -> dict[str, object]:
+    wire: dict[str, object] = {"role": message.role.value, "content": message.content}
+    if message.tool_calls:
+        wire["tool_calls"] = [
+            {"id": call.id, "name": call.name, "arguments": call.arguments}
+            for call in message.tool_calls
+        ]
+    if message.tool_call_id is not None:
+        wire["tool_call_id"] = message.tool_call_id
+    return wire
 
 
 def _slugged(prefix: str, raw: str) -> str:

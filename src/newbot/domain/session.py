@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TypeAlias
 
 from newbot.domain.message import Message
 
@@ -17,8 +18,19 @@ class SessionKey:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionRecord:
-    """One persisted conversation entry: a timestamped message."""
+class MessageRecord:
+    """One persisted conversation message."""
 
     timestamp: datetime
     message: Message
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointRecord:
+    """A compaction boundary: earlier messages are represented by ``summary``."""
+
+    timestamp: datetime
+    summary: str
+
+
+SessionRecord: TypeAlias = MessageRecord | CheckpointRecord

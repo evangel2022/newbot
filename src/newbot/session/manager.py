@@ -6,8 +6,13 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from newbot.domain.message import Message, Role
-from newbot.domain.session import SessionKey, SessionRecord
-from newbot.ports.sessions import SessionStorePort
+from newbot.domain.session import (
+    CheckpointRecord,
+    MessageRecord,
+    SessionKey,
+    SessionRecord,
+)
+from newbot.ports.sessions import SessionStorePort, SummarizerPort
 
 
 class SessionManager:
@@ -23,18 +28,60 @@ class SessionManager:
     async def history(self, key: SessionKey) -> tuple[Message, ...]:
         """Return the replay-safe recent history for a session."""
         records = await self._store.load(self._workspace_id, key)
-        messages = [record.message for record in records]
-        return _trim_for_replay(messages, self._history_limit)
+        checkpoint, tail = _split_at_last_checkpoint(records)
+        return _trim_for_replay(_replayable(checkpoint, tail), self._history_limit)
 
     async def record(self, key: SessionKey, messages: Sequence[Message]) -> None:
         """Append messages as timestamped records."""
         if not messages:
             return
         now = datetime.now(UTC)
-        records = [
-            SessionRecord(timestamp=now, message=message) for message in messages
-        ]
+        records = [MessageRecord(timestamp=now, message=message) for message in messages]
         await self._store.append(self._workspace_id, key, records)
+
+    async def compact(
+        self, key: SessionKey, summarizer: SummarizerPort, *, keep_recent: int
+    ) -> bool:
+        """Fold older messages into a summary checkpoint; report whether it ran."""
+        records = await self._store.load(self._workspace_id, key)
+        checkpoint, tail = _split_at_last_checkpoint(records)
+        if len(tail) <= keep_recent:
+            return False
+        drop = len(tail) - keep_recent
+        summary = await summarizer.summarize(_replayable(checkpoint, tail[:drop]))
+        rewritten: tuple[SessionRecord, ...] = (
+            CheckpointRecord(timestamp=datetime.now(UTC), summary=summary),
+            *tail[drop:],
+        )
+        await self._store.rewrite(self._workspace_id, key, rewritten)
+        return True
+
+
+def _split_at_last_checkpoint(
+    records: Sequence[SessionRecord],
+) -> tuple[CheckpointRecord | None, tuple[MessageRecord, ...]]:
+    """Return the newest checkpoint and the message records recorded after it."""
+    for index in range(len(records) - 1, -1, -1):
+        record = records[index]
+        if isinstance(record, CheckpointRecord):
+            tail = tuple(
+                entry
+                for entry in records[index + 1 :]
+                if isinstance(entry, MessageRecord)
+            )
+            return record, tail
+    return None, tuple(entry for entry in records if isinstance(entry, MessageRecord))
+
+
+def _replayable(
+    checkpoint: CheckpointRecord | None, tail: Sequence[MessageRecord]
+) -> tuple[Message, ...]:
+    """Rebuild model-visible messages: the latest summary plus later messages."""
+    messages: list[Message] = []
+    if checkpoint is not None:
+        messages.append(Message(role=Role.SYSTEM, content=checkpoint.summary))
+    messages.extend(record.message for record in tail)
+    return tuple(messages)
 
 
 def _trim_for_replay(messages: Sequence[Message], limit: int) -> tuple[Message, ...]:

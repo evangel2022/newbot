@@ -48,13 +48,8 @@ def build_runtime(
     """Construct the provider, core, hub, and transport, then wire them."""
     provider = provider_factory(settings.provider)
     hub = EventHub()
-    workspace_root = (settings.agent.workspace or Path.cwd()).resolve()
-    sessions_root = settings.sessions.dir or (config_dir() / "sessions")
-    sessions = SessionManager(
-        JsonlSessionStore(sessions_root),
-        workspace_id=_workspace_id(workspace_root),
-        history_limit=settings.sessions.history_limit,
-    )
+    workspace_root = _workspace_root(settings)
+    sessions = build_sessions(settings)
     sandbox = build_sandbox(settings.tools.sandbox)
     if sandbox.notice is not None:
         notice_stream = sys.stderr if stderr is None else stderr
@@ -94,6 +89,20 @@ def build_runtime(
 
 def _workspace_id(root: Path) -> str:
     return hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+
+
+def _workspace_root(settings: Settings) -> Path:
+    return (settings.agent.workspace or Path.cwd()).resolve()
+
+
+def build_sessions(settings: Settings) -> SessionManager:
+    """Build the persistent session manager for the CLI conversation."""
+    sessions_root = settings.sessions.dir or (config_dir() / "sessions")
+    return SessionManager(
+        JsonlSessionStore(sessions_root),
+        workspace_id=_workspace_id(_workspace_root(settings)),
+        history_limit=settings.sessions.history_limit,
+    )
 
 
 def _configured_secrets(settings: Settings) -> tuple[str, ...]:

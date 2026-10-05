@@ -7,9 +7,12 @@ import sys
 from typing import TextIO
 
 from newbot.adapters.providers.registry import ProviderFactory, build_provider
-from newbot.app.bootstrap import build_runtime
+from newbot.adapters.summarizers.provider import ProviderSummarizer
+from newbot.adapters.transports.cli import CliTransport
+from newbot.app.bootstrap import build_runtime, build_sessions
 from newbot.config.schema import Settings
 from newbot.domain.envelope import InboundEnvelope
+from newbot.domain.session import SessionKey
 
 _CONVERSATION_ID = "default"
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
@@ -80,4 +83,26 @@ async def run_interactive(
             )
     finally:
         await runtime.provider.aclose()
+    return 0
+
+
+async def run_compact(
+    settings: Settings,
+    *,
+    keep_recent: int,
+    stdout: TextIO | None = None,
+    provider_factory: ProviderFactory = build_provider,
+) -> int:
+    """Fold a CLI session's older history into a summary checkpoint."""
+    stream = sys.stdout if stdout is None else stdout
+    provider = provider_factory(settings.provider)
+    try:
+        changed = await build_sessions(settings).compact(
+            SessionKey(transport=CliTransport.transport_id, conversation=_CONVERSATION_ID),
+            ProviderSummarizer(provider, model=settings.agent.model),
+            keep_recent=keep_recent,
+        )
+    finally:
+        await provider.aclose()
+    stream.write("compacted\n" if changed else "nothing to compact\n")
     return 0

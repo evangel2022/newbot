@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from newbot.app.lifecycle import run_once
+from newbot.app.lifecycle import run_compact, run_once
 from newbot.config.schema import Settings
 from newbot.domain.message import Message, Role
 from newbot.domain.tool import ToolCall
@@ -207,3 +207,78 @@ async def test_configured_secret_is_redacted_before_it_is_persisted(
     assert "[redacted]" in tool_messages[0].content
     assert session_files
     assert secret not in persisted
+
+
+async def test_run_compact_folds_history_into_a_replayable_checkpoint(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    await run_once(
+        settings,
+        "first question",
+        provider_factory=lambda _settings: ScriptedProvider(
+            [Message(role=Role.ASSISTANT, content="first reply")]
+        ),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    summarizer = ScriptedProvider(
+        [Message(role=Role.ASSISTANT, content="summary of the first turn")]
+    )
+    stdout = io.StringIO()
+
+    code = await run_compact(
+        settings,
+        keep_recent=1,
+        provider_factory=lambda _settings: summarizer,
+        stdout=stdout,
+    )
+
+    assert code == 0
+    assert stdout.getvalue() == "compacted\n"
+    request = summarizer.requests[0]
+    assert [message.content for message in request.messages] == ["first question"]
+    assert request.system
+    assert request.tools == ()
+
+    third = ScriptedProvider([Message(role=Role.ASSISTANT, content="second reply")])
+    await run_once(
+        settings,
+        "second question",
+        provider_factory=lambda _settings: third,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    replayed = third.requests[0].messages
+    assert replayed[0] == Message(role=Role.SYSTEM, content="summary of the first turn")
+    assert [message.content for message in replayed[1:]] == [
+        "first reply",
+        "second question",
+    ]
+
+
+async def test_run_compact_reports_when_history_already_fits(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    await run_once(
+        settings,
+        "only question",
+        provider_factory=lambda _settings: ScriptedProvider(
+            [Message(role=Role.ASSISTANT, content="only reply")]
+        ),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    provider = FakeProvider(reply_events("unused"))
+    stdout = io.StringIO()
+
+    code = await run_compact(
+        settings,
+        keep_recent=8,
+        provider_factory=lambda _settings: provider,
+        stdout=stdout,
+    )
+
+    assert code == 0
+    assert stdout.getvalue() == "nothing to compact\n"
+    assert provider.requests == []
+    assert provider.closed is True
