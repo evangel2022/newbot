@@ -184,3 +184,33 @@ def test_cli_interactive_keyboard_interrupt_exits_130(tmp_path: Path) -> None:
     )
 
     assert code == 130
+
+
+def test_cli_init_creates_config_and_is_idempotent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "config.toml"
+    workspace = tmp_path / "ws"
+
+    first = main(["init", "--config", str(config), "--workspace", str(workspace)])
+    capsys.readouterr()
+    second = main(["init", "--config", str(config), "--workspace", str(workspace)])
+    captured = capsys.readouterr()
+
+    assert first == 0
+    assert second == 0
+    assert config.is_file()
+    assert workspace.is_dir()
+    assert "already exists" in captured.out
+
+
+def test_cli_init_defaults_to_the_config_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    code = main(["init"])
+
+    assert code == 0
+    assert (tmp_path / "cfg" / "config.toml").is_file()
+    assert (tmp_path / "cfg" / "workspace").is_dir()

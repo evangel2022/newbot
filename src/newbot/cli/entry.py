@@ -13,7 +13,9 @@ from typing import TextIO
 from newbot import __version__
 from newbot.adapters.providers.registry import ProviderFactory, build_provider
 from newbot.app.lifecycle import run_interactive, run_once
+from newbot.config.init import InitOutcome, initialize
 from newbot.config.loader import load_settings
+from newbot.config.paths import config_path
 from newbot.domain.errors import ConfigLoadError, NewbotError
 
 _CONFIG_HELP = "path to config.toml"
@@ -33,6 +35,13 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
     )
+    init = subparsers.add_parser("init", help="create config and workspace defaults")
+    init.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
+    init.add_argument(
+        "--workspace", type=Path, default=None, help="agent workspace directory"
+    )
     return parser
 
 
@@ -45,6 +54,8 @@ def main(
     """Parse arguments and run one turn or an interactive session."""
     _configure_console()
     args = _build_parser().parse_args(argv)
+    if args.command == "init":
+        return _init_command(args)
     if args.command == "run" and not str(args.message).strip():
         print("error: message must not be empty", file=sys.stderr)
         return 2
@@ -70,6 +81,22 @@ def main(
         return 1
     except KeyboardInterrupt:
         return 130
+
+
+def _init_command(args: argparse.Namespace) -> int:
+    config_file = (args.config if args.config is not None else config_path()).resolve()
+    workspace = (args.workspace or config_file.parent / "workspace").resolve()
+    try:
+        outcome = initialize(config_file, workspace)
+    except ConfigLoadError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if outcome is InitOutcome.EXISTS:
+        print(f"config already exists, not modified: {config_file}")
+        return 0
+    print(f"created config: {config_file}")
+    print(f"created workspace: {workspace}")
+    return 0
 
 
 def _configure_console() -> None:
