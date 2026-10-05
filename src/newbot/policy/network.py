@@ -6,8 +6,9 @@ import asyncio
 import ipaddress
 import socket
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network, IPv6Address, IPv6Network
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from newbot.domain.errors import NetworkAccessDenied
 
@@ -48,6 +49,31 @@ _LOCAL_HOSTNAMES = ("localhost",)
 _LOCAL_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 
 
+@dataclass(frozen=True, slots=True)
+class PinnedTarget:
+    """A validated outbound target whose connection address is pinned.
+
+    ``host``/``port`` keep the operator-facing identity (``host`` is the TLS
+    SNI name); ``address`` is the validated IP the socket connects to, so a
+    second, rebinding resolution cannot redirect the connection.
+    """
+
+    url: str
+    scheme: str
+    host: str
+    port: int
+    address: str
+
+    @property
+    def connect_url(self) -> str:
+        """The request URL with the host replaced by the pinned address."""
+        parts = urlsplit(self.url)
+        address = f"[{self.address}]" if ":" in self.address else self.address
+        if self.port != _default_port(self.scheme):
+            address = f"{address}:{self.port}"
+        return urlunsplit((self.scheme, address, parts.path, parts.query, ""))
+
+
 class NetworkGuard:
     """Decides whether an outbound HTTP URL may be requested."""
 
@@ -62,13 +88,20 @@ class NetworkGuard:
         )
         self._resolve = resolver or _default_resolver
 
-    async def ensure_allowed(self, url: str) -> None:
-        """Raise ``NetworkAccessDenied`` unless the URL targets a public host."""
-        host = _host_of(url)
+    async def resolve(self, url: str) -> PinnedTarget:
+        """Validate ``url`` and return it with the connection address pinned.
+
+        Every resolved address is checked; the first survives as the pinned
+        connection address, so the request cannot be re-resolved to a private
+        target between validation and connect.
+        """
+        scheme, host, port = _split(url)
         literal = _as_ip(host)
         if literal is not None:
             self._check(literal, url)
-            return
+            return PinnedTarget(
+                url=url, scheme=scheme, host=host, port=port, address=str(literal)
+            )
         if _is_local_name(host):
             raise NetworkAccessDenied(f"blocked local host {host!r} in {url!r}")
         try:
@@ -77,11 +110,16 @@ class NetworkGuard:
             raise NetworkAccessDenied(f"cannot resolve {host!r}: {exc}") from exc
         if not addresses:
             raise NetworkAccessDenied(f"cannot resolve {host!r}")
+        resolved: list[IPv4Address | IPv6Address] = []
         for raw in addresses:
             address = _as_ip(raw)
             if address is None:
                 raise NetworkAccessDenied(f"resolver returned invalid address {raw!r}")
             self._check(address, url)
+            resolved.append(address)
+        return PinnedTarget(
+            url=url, scheme=scheme, host=host, port=port, address=str(resolved[0])
+        )
 
     def _check(self, address: IPv4Address | IPv6Address, url: str) -> None:
         if any(
@@ -99,13 +137,22 @@ async def _default_resolver(host: str) -> Sequence[str]:
     return sorted({info[4][0] for info in infos})
 
 
-def _host_of(url: str) -> str:
-    parts = urlsplit(url)
+def _split(url: str) -> tuple[str, str, int]:
+    try:
+        parts: SplitResult = urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError as exc:
+        raise NetworkAccessDenied(f"invalid URL {url!r}: {exc}") from exc
     if parts.scheme not in {"http", "https"}:
         raise NetworkAccessDenied(f"unsupported scheme in {url!r}")
-    if not parts.hostname:
+    if not host:
         raise NetworkAccessDenied(f"missing host in {url!r}")
-    return parts.hostname
+    return parts.scheme, host, port or _default_port(parts.scheme)
+
+
+def _default_port(scheme: str) -> int:
+    return 443 if scheme == "https" else 80
 
 
 def _as_ip(host: str) -> IPv4Address | IPv6Address | None:

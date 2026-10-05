@@ -413,7 +413,7 @@ Memory has two tiers with different guarantees.
 | --- | --- |
 | Filesystem paths | All path handling goes through the workspace guard (S1). Containment is checked against the effective project workspace; extra roots are capability-specific (S2). |
 | Shell execution | The application guard rejects working directories outside the workspace and blocks obvious escapes. Optional OS sandbox (S4) provides real isolation; a configured-but-unavailable sandbox fails closed. |
-| Outbound HTTP | All tool HTTP goes through the shared network guard (S3). Loopback/private/link-local/CGNAT/metadata targets are blocked; only an explicit CIDR whitelist opens a hole. Explicit operator-configured provider proxies are a separate, authorized trust boundary. |
+| Outbound HTTP | All tool HTTP goes through the shared network guard (S3). Loopback/private/link-local/CGNAT/metadata targets are blocked; only an explicit CIDR whitelist opens a hole. The validated address is pinned for the connection, so a rebinding resolver cannot redirect it after validation, and the response body is read under a size bound. Explicit operator-configured provider proxies are a separate, authorized trust boundary. |
 | MCP transports | HTTP/SSE MCP endpoints are validated before probing and before each request; private endpoints require the explicit whitelist. Stdio MCP servers are outside the HTTP guard. |
 | Transport access | Chat/WebSocket transports enforce allowlists, pairing, or tokens (S5). Unconfirmed peers cannot mutate. |
 | Client/peer assets | The local installation owns executable assets; remote hosts supply data/events/media only (R3). |
