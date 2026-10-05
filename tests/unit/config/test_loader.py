@@ -61,6 +61,22 @@ curationIntervalSeconds = -1
         load_settings(_write(tmp_path, text), environ={})
 
 
+def test_out_of_range_server_port_is_rejected(tmp_path: Path) -> None:
+    text = """
+[provider]
+baseUrl = "https://api.example.com/v1"
+
+[agent]
+model = "gpt-test"
+
+[server]
+port = 70000
+"""
+
+    with pytest.raises(ConfigLoadError):
+        load_settings(_write(tmp_path, text), environ={})
+
+
 def test_missing_env_reference_is_located(tmp_path: Path) -> None:
     with pytest.raises(ConfigLoadError) as info:
         load_settings(_write(tmp_path, VALID), environ={})

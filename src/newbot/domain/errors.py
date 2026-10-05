@@ -47,3 +47,7 @@ class VersionError(NewbotError):
 
 class CurationError(NewbotError):
     """A curation pass could not read, interpret, or apply its edits."""
+
+
+class TransportError(NewbotError):
+    """A transport could not start, deliver, or shut down."""

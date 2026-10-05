@@ -13,6 +13,7 @@ from newbot.adapters.stores.json_cursors import JsonCursors
 from newbot.adapters.stores.jsonl_journal import JsonlJournal
 from newbot.adapters.summarizers.provider import ProviderSummarizer
 from newbot.adapters.transports.cli import CliTransport
+from newbot.adapters.transports.http_ws import HealthServer
 from newbot.app.bootstrap import (
     Runtime,
     build_runtime,
@@ -269,11 +270,15 @@ async def run_serve(
     interval = settings.schedule.curation_interval_seconds
     if interval is not None:
         scheduler.every(interval, _curation_job(settings, runtime.provider, stream))
+    health = HealthServer(port=settings.server.port)
+    health.start()
     stream.write("serving\n")
+    stream.write(f"health {health.url}\n")
     stream.flush()
     try:
         await scheduler.run()
     finally:
+        await asyncio.to_thread(health.stop)
         await runtime.provider.aclose()
     return 0
 

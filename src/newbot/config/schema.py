@@ -58,6 +58,12 @@ class ScheduleSettings(_SettingsModel):
     curation_interval_seconds: float | None = Field(default=None, gt=0)
 
 
+class ServerSettings(_SettingsModel):
+    """The loopback HTTP surface of the long-running host."""
+
+    port: int = Field(default=8787, ge=0, le=65535)
+
+
 class ToolsSettings(_SettingsModel):
     """Tool capability policy."""
 
@@ -101,4 +107,5 @@ class Settings(_SettingsModel):
     agent: AgentSettings
     sessions: SessionSettings = Field(default_factory=SessionSettings)
     schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
+    server: ServerSettings = Field(default_factory=ServerSettings)
     tools: ToolsSettings = Field(default_factory=ToolsSettings)

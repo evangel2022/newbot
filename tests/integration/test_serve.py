@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 from pathlib import Path
 
+import httpx
 import pytest
 
 from newbot.adapters.stores.jsonl_journal import JsonlJournal
@@ -23,6 +25,7 @@ def _settings(tmp_path: Path, *, interval: float | None) -> Settings:
             "agent": {"model": "gpt-test", "workspace": str(tmp_path / "ws")},
             "sessions": {"dir": str(tmp_path / "sessions")},
             "schedule": {"curation_interval_seconds": interval},
+            "server": {"port": 0},
         }
     )
 
@@ -78,6 +81,43 @@ async def test_serve_without_a_schedule_idles_until_cancelled(tmp_path: Path) ->
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_serve_exposes_a_loopback_health_endpoint(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, interval=None)
+    stdout = io.StringIO()
+
+    task = asyncio.create_task(
+        run_serve(
+            settings,
+            provider_factory=lambda _settings: FakeProvider(reply_events("x")),
+            stdout=stdout,
+            stderr=io.StringIO(),
+        )
+    )
+    try:
+        url = await _wait_for_health_url(stdout)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{url}/health")
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+async def _wait_for_health_url(stdout: io.StringIO, *, timeout: float = 2.0) -> str:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        match = re.search(r"health (http://\S+)", stdout.getvalue())
+        if match is not None:
+            return match.group(1)
+        if loop.time() > deadline:
+            raise TimeoutError("health URL was not announced")
+        await asyncio.sleep(0.01)
 
 
 async def _wait_for_file(path: Path, *, timeout: float = 2.0) -> None:
