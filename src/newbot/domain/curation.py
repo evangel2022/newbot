@@ -27,3 +27,4 @@ class CurationOutcome:
 
     changed: tuple[str, ...]
     consumed: int
+    change_set: str | None = None

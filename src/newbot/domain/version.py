@@ -14,3 +14,4 @@ class FileVersion:
     path: str
     timestamp: datetime
     size: int
+    change_set: str | None = None

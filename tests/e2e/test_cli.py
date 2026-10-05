@@ -396,3 +396,16 @@ def test_cli_memory_restore_rejects_an_unknown_version(
 
     assert result.returncode == 1
     assert "unknown memory version" in result.stderr
+
+
+def test_cli_memory_revert_set_rejects_an_unknown_change_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    result = _run_cli(
+        "memory", "revert-set", "0" * 16, "--config", str(_write_config(tmp_path))
+    )
+
+    assert result.returncode == 1
+    assert "unknown change-set" in result.stderr

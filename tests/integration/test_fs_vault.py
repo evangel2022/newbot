@@ -33,6 +33,7 @@ async def test_write_lists_versions_newest_first_and_skips_unchanged(
     assert [version.version_id for version in versions] == [second, first]
     assert [version.path for version in versions] == ["memory/knowledge.md"] * 2
     assert [version.size for version in versions] == [3, 3]
+    assert [version.change_set for version in versions] == [None, None]
     assert await vault.read(knowledge, first) == "one"
 
 
@@ -63,6 +64,49 @@ async def test_versions_lists_every_file_newest_first(tmp_path: Path) -> None:
         "memory/knowledge.md",
         "memory/knowledge.md",
     ]
+
+
+async def test_write_set_groups_versions_and_revert_set_rolls_the_pass_back(
+    tmp_path: Path,
+) -> None:
+    vault, knowledge = _vault(tmp_path)
+    persona = knowledge.parent.parent / "persona.md"
+    baseline = await vault.write_set([(knowledge, "one"), (persona, "voice")])
+    second = await vault.write_set([(knowledge, "two"), (persona, "new voice")])
+
+    versions = await vault.versions()
+    assert [version.change_set for version in versions] == [
+        second,
+        second,
+        baseline,
+        baseline,
+    ]
+
+    reverted = await vault.revert_set(second)
+
+    assert reverted == ("memory/knowledge.md", "persona.md")
+    assert knowledge.read_text(encoding="utf-8") == "one"
+    assert persona.read_text(encoding="utf-8") == "voice"
+
+
+async def test_revert_set_removes_files_the_pass_created(tmp_path: Path) -> None:
+    vault, knowledge = _vault(tmp_path)
+    created = await vault.write_set([(knowledge, "born")])
+    assert knowledge.is_file()
+
+    reverted = await vault.revert_set(created)
+
+    assert reverted == ("memory/knowledge.md",)
+    assert not knowledge.exists()
+
+
+async def test_unknown_or_malformed_change_set_is_rejected(tmp_path: Path) -> None:
+    vault, _ = _vault(tmp_path)
+
+    with pytest.raises(VersionError):
+        await vault.revert_set("0" * 16)
+    with pytest.raises(VersionError):
+        await vault.revert_set("not-a-change-set")
 
 
 async def test_identical_content_in_two_files_records_distinct_versions(

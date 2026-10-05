@@ -48,10 +48,12 @@ class Curator:
             for relative, path in targets.items()
         )
         edits = await self._interpreter.interpret(pending, files)
-        changed = await self._apply(edits, targets, files)
+        changed, change_set = await self._apply(edits, targets, files)
         cursor = pending[-1].cursor
         await self._cursors.write(cursor)
-        return CurationOutcome(changed=changed, consumed=cursor)
+        return CurationOutcome(
+            changed=changed, consumed=cursor, change_set=change_set
+        )
 
     def _targets(self) -> dict[str, Path]:
         return {
@@ -64,9 +66,9 @@ class Curator:
         edits: Sequence[CurationEdit],
         targets: Mapping[str, Path],
         files: Sequence[DurableFile],
-    ) -> tuple[str, ...]:
+    ) -> tuple[tuple[str, ...], str | None]:
         current = {file.path: file.content for file in files}
-        changed: list[str] = []
+        writes: dict[str, tuple[Path, str]] = {}
         for edit in edits:
             target = targets.get(edit.path)
             if target is None:
@@ -76,10 +78,12 @@ class Curator:
             )
             if current.get(edit.path) == content:
                 continue
-            await self._versioning.write(target, content)
+            writes[edit.path] = (target, content)
             current[edit.path] = content
-            changed.append(edit.path)
-        return tuple(changed)
+        if not writes:
+            return (), None
+        change_set = await self._versioning.write_set(tuple(writes.values()))
+        return tuple(writes), change_set
 
 
 def _read_text(path: Path) -> str:

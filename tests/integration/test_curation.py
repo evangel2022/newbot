@@ -54,9 +54,13 @@ async def test_curation_applies_an_edit_and_advances_the_cursor(tmp_path: Path) 
 
     outcome = await _curator(parts, interpreter).run()
 
-    assert outcome == CurationOutcome(changed=("memory/knowledge.md",), consumed=2)
+    assert outcome.changed == ("memory/knowledge.md",)
+    assert outcome.consumed == 2
+    assert outcome.change_set is not None
     assert layout.knowledge.read_text(encoding="utf-8") == "- decided X\n"
-    assert len(await vault.history(layout.knowledge)) == 1
+    history = await vault.history(layout.knowledge)
+    assert len(history) == 1
+    assert history[0].change_set == outcome.change_set
     assert await cursors.read() == 2
     entries, files = interpreter.calls[0]
     assert [entry.summary for entry in entries] == ["first summary", "second summary"]
@@ -146,3 +150,30 @@ async def test_curation_redacts_secrets_before_writing(tmp_path: Path) -> None:
     written = layout.knowledge.read_text(encoding="utf-8")
     assert "sk-live-secret" not in written
     assert "[redacted]" in written
+
+
+async def test_one_pass_groups_every_edit_into_a_revertible_change_set(
+    tmp_path: Path,
+) -> None:
+    parts = _parts(tmp_path)
+    layout, journal, _, vault = parts
+    await journal.append("summary")
+    interpreter = ScriptedCurator(
+        [
+            CurationEdit(path="user.md", content="name: A\n"),
+            CurationEdit(path="memory/knowledge.md", content="- fact\n"),
+        ]
+    )
+
+    outcome = await _curator(parts, interpreter).run()
+
+    assert outcome.changed == ("user.md", "memory/knowledge.md")
+    assert outcome.change_set is not None
+    versions = await vault.versions()
+    assert [version.change_set for version in versions] == [outcome.change_set] * 2
+
+    reverted = await vault.revert_set(outcome.change_set)
+
+    assert reverted == ("user.md", "memory/knowledge.md")
+    assert not layout.user.exists()
+    assert not layout.knowledge.exists()

@@ -17,6 +17,7 @@ from newbot.app.lifecycle import (
     run_curate,
     run_memory_log,
     run_memory_restore,
+    run_memory_revert_set,
     run_once,
 )
 from newbot.config.schema import Settings
@@ -417,11 +418,16 @@ async def test_run_curate_folds_new_summaries_into_durable_files(
     )
 
     assert code == 0
-    assert stdout.getvalue() == "curated memory/knowledge.md\n"
+    lines = stdout.getvalue().splitlines()
+    assert lines[0] == "curated memory/knowledge.md"
+    assert lines[1].startswith("change-set ")
+    change_set = lines[1].split()[1]
     knowledge = tmp_path / "ws" / "memory" / "knowledge.md"
     assert knowledge.read_text(encoding="utf-8") == "- fact\n"
     vault = FsVault(vault_dir(settings), tmp_path / "ws")
-    assert len(await vault.history(knowledge)) == 1
+    history = await vault.history(knowledge)
+    assert len(history) == 1
+    assert history[0].change_set == change_set
 
     second = ScriptedProvider([Message(role=Role.ASSISTANT, content='{"files": []}')])
     stdout = io.StringIO()
@@ -433,6 +439,15 @@ async def test_run_curate_folds_new_summaries_into_durable_files(
     assert code == 0
     assert stdout.getvalue() == "nothing to curate\n"
     assert second.requests == []
+
+    stdout = io.StringIO()
+    code = await run_memory_revert_set(settings, change_set=change_set, stdout=stdout)
+
+    assert code == 0
+    assert stdout.getvalue() == (
+        f"restored memory/knowledge.md to change-set {change_set}\n"
+    )
+    assert not knowledge.exists()
 
 
 async def test_memory_log_lists_versions_and_restore_rolls_one_back(
@@ -453,6 +468,7 @@ async def test_memory_log_lists_versions_and_restore_rolls_one_back(
     assert len(lines) == 2
     assert lines[0].split()[0] == second
     assert lines[0].split()[1] == "memory/knowledge.md"
+    assert lines[0].split()[-1] == "-"
     assert lines[1].split()[0] == first
 
     stdout = io.StringIO()

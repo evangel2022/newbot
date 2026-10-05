@@ -8,8 +8,10 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -29,6 +31,7 @@ class _WireVersion(BaseModel):
     path: str
     timestamp: datetime
     size: int
+    change_set: str | None = None
 
 
 class FsVault:
@@ -47,6 +50,10 @@ class FsVault:
         async with self._lock:
             return await asyncio.to_thread(self._write, path, content)
 
+    async def write_set(self, files: Sequence[tuple[Path, str]]) -> str:
+        async with self._lock:
+            return await asyncio.to_thread(self._write_set, tuple(files))
+
     async def history(self, path: Path) -> tuple[FileVersion, ...]:
         async with self._lock:
             return await asyncio.to_thread(self._history, path)
@@ -63,6 +70,10 @@ class FsVault:
         async with self._lock:
             await asyncio.to_thread(self._restore, path, version_id)
 
+    async def revert_set(self, change_set_id: str) -> tuple[str, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(self._revert_set, change_set_id)
+
     def _write(self, path: Path, content: str) -> str:
         relative = self._relative(path)
         version_id = _digest(relative, content)
@@ -70,11 +81,44 @@ class FsVault:
         self._write_file(path, content, relative)
         return version_id
 
+    def _write_set(self, files: Sequence[tuple[Path, str]]) -> str:
+        change_set = uuid4().hex[:_VERSION_LENGTH]
+        resolved = [(self._relative(path), path, content) for path, content in files]
+        for relative, path, content in resolved:
+            version_id = _digest(relative, content)
+            self._store_version(relative, version_id, content, change_set=change_set)
+            self._write_file(path, content, relative)
+        return change_set
+
     def _restore(self, path: Path, version_id: str) -> None:
         relative = self._relative(path)
         content = self._read(path, version_id)
         self._store_version(relative, version_id, content)
         self._write_file(path, content, relative)
+
+    def _revert_set(self, change_set_id: str) -> tuple[str, ...]:
+        if _VERSION_PATTERN.fullmatch(change_set_id) is None:
+            raise VersionError(f"malformed change-set id: {change_set_id!r}")
+        index = self._read_index()
+        members = [
+            (position, version)
+            for position, version in enumerate(index)
+            if version.change_set == change_set_id
+        ]
+        if not members:
+            raise VersionError(f"unknown change-set: {change_set_id}")
+        reverted: list[str] = []
+        for position, member in members:
+            path = self._root / member.path
+            previous = _previous_version(index, position, member.path)
+            if previous is None:
+                _remove_file(path, member.path)
+            else:
+                content = self._read(path, previous.version_id)
+                self._store_version(member.path, previous.version_id, content)
+                self._write_file(path, content, member.path)
+            reverted.append(member.path)
+        return tuple(reverted)
 
     def _history(self, path: Path) -> tuple[FileVersion, ...]:
         relative = self._relative(path)
@@ -100,7 +144,14 @@ class FsVault:
         except OSError as exc:
             raise VersionError(f"cannot read version {version_id}: {exc}") from exc
 
-    def _store_version(self, relative: str, version_id: str, content: str) -> None:
+    def _store_version(
+        self,
+        relative: str,
+        version_id: str,
+        content: str,
+        *,
+        change_set: str | None = None,
+    ) -> None:
         latest = next(
             (
                 version
@@ -122,6 +173,7 @@ class FsVault:
                     path=relative,
                     timestamp=datetime.now(UTC),
                     size=len(content),
+                    change_set=change_set,
                 )
             )
         except OSError as exc:
@@ -164,6 +216,7 @@ class FsVault:
                 "path": version.path,
                 "timestamp": version.timestamp.isoformat(),
                 "size": version.size,
+                "change_set": version.change_set,
             },
             ensure_ascii=False,
         )
@@ -188,7 +241,24 @@ def _parse_version(line: str, number: int) -> FileVersion:
         path=wire.path,
         timestamp=wire.timestamp,
         size=wire.size,
+        change_set=wire.change_set,
     )
+
+
+def _previous_version(
+    index: Sequence[FileVersion], position: int, relative: str
+) -> FileVersion | None:
+    for version in reversed(index[:position]):
+        if version.path == relative:
+            return version
+    return None
+
+
+def _remove_file(path: Path, relative: str) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise VersionError(f"cannot remove {relative}: {exc}") from exc
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

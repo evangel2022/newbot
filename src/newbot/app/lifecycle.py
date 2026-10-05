@@ -246,6 +246,8 @@ async def _curate_memory(
         await provider.aclose()
     if outcome.changed:
         stream.write(f"curated {', '.join(outcome.changed)}\n")
+        if outcome.change_set is not None:
+            stream.write(f"change-set {outcome.change_set}\n")
     else:
         stream.write("nothing to curate\n")
 
@@ -273,7 +275,8 @@ async def run_memory_log(settings: Settings, *, stdout: TextIO | None = None) ->
     for version in versions:
         stream.write(
             f"{version.version_id}  {version.path}  "
-            f"{version.timestamp.isoformat()}  {version.size}\n"
+            f"{version.timestamp.isoformat()}  {version.size}  "
+            f"{version.change_set or '-'}\n"
         )
     return 0
 
@@ -297,4 +300,16 @@ async def run_memory_restore(
         raise VersionError(f"unknown memory version: {version_id}")
     await vault.restore(layout.workspace_root / match.path, version_id)
     stream.write(f"restored {match.path} to {version_id}\n")
+    return 0
+
+
+async def run_memory_revert_set(
+    settings: Settings, *, change_set: str, stdout: TextIO | None = None
+) -> int:
+    """Undo one change-set, returning each file to its previous version."""
+    stream = sys.stdout if stdout is None else stdout
+    layout = MemoryLayout(resolve_workspace_root(settings))
+    vault = FsVault(vault_dir(settings), layout.workspace_root)
+    reverted = await vault.revert_set(change_set)
+    stream.write(f"restored {', '.join(reverted)} to change-set {change_set}\n")
     return 0

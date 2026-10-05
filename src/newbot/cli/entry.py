@@ -19,6 +19,7 @@ from newbot.app.lifecycle import (
     run_interactive,
     run_memory_log,
     run_memory_restore,
+    run_memory_revert_set,
     run_once,
 )
 from newbot.config.init import InitOutcome, initialize
@@ -97,6 +98,13 @@ def _build_parser() -> argparse.ArgumentParser:
     memory_restore.add_argument(
         "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
     )
+    memory_revert = memory_commands.add_parser(
+        "revert-set", help="undo one curation change-set"
+    )
+    memory_revert.add_argument("change_set", help="the change-set id to revert")
+    memory_revert.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
     return parser
 
 
@@ -169,6 +177,10 @@ def _init_command(args: argparse.Namespace) -> int:
 def _memory_command(args: argparse.Namespace, settings: Settings) -> int:
     if args.memory_command == "restore":
         return asyncio.run(run_memory_restore(settings, version_id=args.version))
+    if args.memory_command == "revert-set":
+        return asyncio.run(
+            run_memory_revert_set(settings, change_set=args.change_set)
+        )
     return asyncio.run(run_memory_log(settings))
 
 
