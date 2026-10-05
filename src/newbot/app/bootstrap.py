@@ -48,7 +48,7 @@ def build_runtime(
     """Construct the provider, core, hub, and transport, then wire them."""
     provider = provider_factory(settings.provider)
     hub = EventHub()
-    workspace_root = _workspace_root(settings)
+    workspace_root = resolve_workspace_root(settings)
     sessions = build_sessions(settings)
     sandbox = build_sandbox(settings.tools.sandbox)
     if sandbox.notice is not None:
@@ -91,7 +91,8 @@ def _workspace_id(root: Path) -> str:
     return hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
 
 
-def _workspace_root(settings: Settings) -> Path:
+def resolve_workspace_root(settings: Settings) -> Path:
+    """Resolve the agent workspace root for one process."""
     return (settings.agent.workspace or Path.cwd()).resolve()
 
 
@@ -100,7 +101,7 @@ def build_sessions(settings: Settings) -> SessionManager:
     sessions_root = settings.sessions.dir or (config_dir() / "sessions")
     return SessionManager(
         JsonlSessionStore(sessions_root),
-        workspace_id=_workspace_id(_workspace_root(settings)),
+        workspace_id=_workspace_id(resolve_workspace_root(settings)),
         history_limit=settings.sessions.history_limit,
     )
 

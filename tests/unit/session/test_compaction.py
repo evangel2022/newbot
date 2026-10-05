@@ -19,7 +19,7 @@ async def test_compaction_replays_a_summary_plus_recent_messages_verbatim() -> N
 
     changed = await manager.compact(KEY, summarizer, keep_recent=2)
 
-    assert changed is True
+    assert changed == "earlier turns"
     assert summarizer.inputs == [messages[:4]]
     records = store.records[("ws", "test", "c1")]
     assert isinstance(records[0], CheckpointRecord)
@@ -50,7 +50,7 @@ async def test_compaction_folds_the_previous_summary_into_the_next() -> None:
 
     changed = await manager.compact(KEY, summarizer, keep_recent=2)
 
-    assert changed is True
+    assert changed == "second"
     assert summarizer.inputs == [
         (
             Message(role=Role.SYSTEM, content="first"),
@@ -72,6 +72,6 @@ async def test_compaction_is_a_no_op_when_history_fits() -> None:
     await manager.record(KEY, (Message(role=Role.USER, content="hi"),))
     summarizer = FakeSummarizer()
 
-    assert await manager.compact(KEY, summarizer, keep_recent=8) is False
+    assert await manager.compact(KEY, summarizer, keep_recent=8) is None
     assert summarizer.inputs == []
     assert len(store.records[("ws", "test", "c1")]) == 1

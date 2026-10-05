@@ -7,12 +7,14 @@ import sys
 from typing import TextIO
 
 from newbot.adapters.providers.registry import ProviderFactory, build_provider
+from newbot.adapters.stores.jsonl_journal import JsonlJournal
 from newbot.adapters.summarizers.provider import ProviderSummarizer
 from newbot.adapters.transports.cli import CliTransport
-from newbot.app.bootstrap import build_runtime, build_sessions
+from newbot.app.bootstrap import build_runtime, build_sessions, resolve_workspace_root
 from newbot.config.schema import Settings
 from newbot.domain.envelope import InboundEnvelope
 from newbot.domain.session import SessionKey
+from newbot.memory.layout import MemoryLayout
 
 _CONVERSATION_ID = "default"
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
@@ -96,13 +98,17 @@ async def run_compact(
     """Fold a CLI session's older history into a summary checkpoint."""
     stream = sys.stdout if stdout is None else stdout
     provider = provider_factory(settings.provider)
+    journal = JsonlJournal(MemoryLayout(resolve_workspace_root(settings)).journal)
+    summary: str | None = None
     try:
-        changed = await build_sessions(settings).compact(
+        summary = await build_sessions(settings).compact(
             SessionKey(transport=CliTransport.transport_id, conversation=_CONVERSATION_ID),
             ProviderSummarizer(provider, model=settings.agent.model),
             keep_recent=keep_recent,
         )
+        if summary is not None:
+            await journal.append(summary)
     finally:
         await provider.aclose()
-    stream.write("compacted\n" if changed else "nothing to compact\n")
+    stream.write("compacted\n" if summary is not None else "nothing to compact\n")
     return 0

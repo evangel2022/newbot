@@ -41,12 +41,12 @@ class SessionManager:
 
     async def compact(
         self, key: SessionKey, summarizer: SummarizerPort, *, keep_recent: int
-    ) -> bool:
-        """Fold older messages into a summary checkpoint; report whether it ran."""
+    ) -> str | None:
+        """Fold older messages into a checkpoint; return its summary, else None."""
         records = await self._store.load(self._workspace_id, key)
         checkpoint, tail = _split_at_last_checkpoint(records)
         if len(tail) <= keep_recent:
-            return False
+            return None
         drop = len(tail) - keep_recent
         summary = await summarizer.summarize(_replayable(checkpoint, tail[:drop]))
         rewritten: tuple[SessionRecord, ...] = (
@@ -54,7 +54,7 @@ class SessionManager:
             *tail[drop:],
         )
         await self._store.rewrite(self._workspace_id, key, rewritten)
-        return True
+        return summary
 
 
 def _split_at_last_checkpoint(

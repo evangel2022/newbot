@@ -33,4 +33,7 @@ class ProviderSummarizer:
                 final = event.message
         if final is None:
             raise ProviderError("provider stream ended without a completion")
-        return final.content
+        summary = final.content.strip()
+        if not summary:
+            raise ProviderError("summarizer returned an empty summary")
+        return summary

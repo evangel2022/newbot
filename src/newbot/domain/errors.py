@@ -35,3 +35,7 @@ class NetworkAccessDenied(ToolError):
 
 class SessionError(NewbotError):
     """A session record could not be read, normalized, or written."""
+
+
+class JournalError(NewbotError):
+    """A consolidated journal entry could not be read, normalized, or written."""

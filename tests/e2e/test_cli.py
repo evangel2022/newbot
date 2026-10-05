@@ -42,9 +42,14 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _write_config(tmp_path: Path) -> Path:
+    workspace = tmp_path / "ws"
+    workspace.mkdir(exist_ok=True)
+    sessions = (tmp_path / "sessions").as_posix()
     path = tmp_path / "config.toml"
     path.write_text(
-        CONFIG + f'\n[sessions]\ndir = "{(tmp_path / "sessions").as_posix()}"\n',
+        CONFIG
+        + f'workspace = "{workspace.as_posix()}"\n'
+        + f'\n[sessions]\ndir = "{sessions}"\n',
         encoding="utf-8",
     )
     return path

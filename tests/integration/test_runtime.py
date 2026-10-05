@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from newbot.adapters.stores.jsonl_journal import JsonlJournal
 from newbot.app.lifecycle import run_compact, run_once
 from newbot.config.schema import Settings
 from newbot.domain.message import Message, Role
@@ -22,6 +23,12 @@ def _settings(tmp_path: Path) -> Settings:
             "sessions": {"dir": str(tmp_path / "sessions")},
         }
     )
+
+
+def _settings_in_workspace(tmp_path: Path) -> Settings:
+    settings = _settings(tmp_path)
+    agent = settings.agent.model_copy(update={"workspace": tmp_path / "ws"})
+    return settings.model_copy(update={"agent": agent})
 
 
 async def test_run_once_streams_reply_and_closes_provider(tmp_path: Path) -> None:
@@ -212,7 +219,7 @@ async def test_configured_secret_is_redacted_before_it_is_persisted(
 async def test_run_compact_folds_history_into_a_replayable_checkpoint(
     tmp_path: Path,
 ) -> None:
-    settings = _settings(tmp_path)
+    settings = _settings_in_workspace(tmp_path)
     await run_once(
         settings,
         "first question",
@@ -255,10 +262,13 @@ async def test_run_compact_folds_history_into_a_replayable_checkpoint(
         "first reply",
         "second question",
     ]
+    entries = await JsonlJournal(tmp_path / "ws" / "memory" / "journal.jsonl").entries()
+    assert [entry.summary for entry in entries] == ["summary of the first turn"]
+    assert entries[0].cursor == 1
 
 
 async def test_run_compact_reports_when_history_already_fits(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
+    settings = _settings_in_workspace(tmp_path)
     await run_once(
         settings,
         "only question",
@@ -282,3 +292,4 @@ async def test_run_compact_reports_when_history_already_fits(tmp_path: Path) -> 
     assert stdout.getvalue() == "nothing to compact\n"
     assert provider.requests == []
     assert provider.closed is True
+    assert not (tmp_path / "ws" / "memory" / "journal.jsonl").exists()
