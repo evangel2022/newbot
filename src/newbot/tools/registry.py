@@ -57,12 +57,15 @@ def build_default_registry(
     shell_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> ToolRegistry:
     """Construct the built-in tool set, filtered by the agent allowlist."""
+    workspace_only = WorkspaceGuard(guard.root)
     tools: list[Tool] = [
         ReadFileTool(guard),
         WriteFileTool(guard),
         ListDirTool(guard),
         ShellTool(
-            ShellGuard(guard), sandbox=sandbox, timeout_seconds=shell_timeout_seconds
+            ShellGuard(workspace_only),
+            sandbox=sandbox,
+            timeout_seconds=shell_timeout_seconds,
         ),
         WebFetchTool(network_guard),
     ]

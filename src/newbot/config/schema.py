@@ -58,12 +58,23 @@ class ToolsSettings(_SettingsModel):
     sandbox: str = "none"
     ssrf_whitelist: list[str] = Field(default_factory=list)
     shell_timeout_seconds: float = Field(default=30.0, gt=0)
+    extra_read_dirs: list[Path] = Field(default_factory=list)
+    extra_write_dirs: list[Path] = Field(default_factory=list)
+    extra_write_files: list[Path] = Field(default_factory=list)
 
     @field_validator("sandbox")
     @classmethod
     def _validate_sandbox(cls, value: str) -> str:
         if value not in {"none", "bwrap", "seatbelt"}:
             raise ValueError(f"unknown sandbox {value!r}")
+        return value
+
+    @field_validator("extra_read_dirs", "extra_write_dirs", "extra_write_files")
+    @classmethod
+    def _validate_absolute_paths(cls, value: list[Path]) -> list[Path]:
+        for path in value:
+            if not path.is_absolute():
+                raise ValueError(f"path must be absolute: {path}")
         return value
 
     @field_validator("ssrf_whitelist")

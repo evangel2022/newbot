@@ -9,10 +9,11 @@ from pathlib import Path
 from newbot.domain.errors import ToolError
 from newbot.domain.session import SessionKey
 from newbot.domain.tool import ToolCall
+from newbot.policy.network import NetworkGuard
 from newbot.policy.shell import ShellGuard
 from newbot.policy.workspace import WorkspaceGuard
 from newbot.ports.tools import ToolContext
-from newbot.tools.registry import ToolRegistry
+from newbot.tools.registry import ToolRegistry, build_default_registry
 from newbot.tools.shell import ShellTool
 
 
@@ -121,3 +122,22 @@ async def test_unavailable_sandbox_fails_closed(tmp_path: Path) -> None:
     assert result.is_error is True
     assert "sandbox" in result.content
     assert not (tmp_path / "ran.txt").exists()
+
+
+async def test_extra_roots_do_not_extend_shell_scope(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    extra = tmp_path / "knowledge"
+    extra.mkdir()
+    (extra / "doc.md").write_text("reference", encoding="utf-8")
+    registry = build_default_registry(
+        WorkspaceGuard(root, read_roots=[extra]), network_guard=NetworkGuard()
+    )
+
+    as_dir = await registry.invoke(
+        _call("echo hi", working_dir=str(extra)), _ctx(root)
+    )
+    as_path = await registry.invoke(_call(f"cat {extra / 'doc.md'}"), _ctx(root))
+
+    assert as_dir.is_error is True
+    assert as_path.is_error is True

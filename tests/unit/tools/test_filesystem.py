@@ -98,3 +98,41 @@ async def test_allowlist_disables_write_file(tmp_path: Path) -> None:
 
     assert result.is_error is True
     assert "unknown tool" in result.content
+
+
+async def test_extra_read_root_is_readable_but_not_writable(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    extra = tmp_path / "knowledge"
+    extra.mkdir()
+    (extra / "doc.md").write_text("reference", encoding="utf-8")
+    registry = _registry(WorkspaceGuard(root, read_roots=[extra]))
+
+    read = await registry.invoke(_call("read_file", path=str(extra / "doc.md")), _ctx())
+    write = await registry.invoke(
+        _call("write_file", path=str(extra / "new.md"), content="x"), _ctx()
+    )
+
+    assert read.content == "reference"
+    assert write.is_error is True
+    assert not (extra / "new.md").exists()
+
+
+async def test_extra_write_root_is_writable_but_not_readable(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    extra = tmp_path / "outbox"
+    extra.mkdir()
+    (extra / "existing.txt").write_text("data", encoding="utf-8")
+    registry = _registry(WorkspaceGuard(root, write_roots=[extra]))
+
+    write = await registry.invoke(
+        _call("write_file", path=str(extra / "new.txt"), content="x"), _ctx()
+    )
+    read = await registry.invoke(
+        _call("read_file", path=str(extra / "existing.txt")), _ctx()
+    )
+
+    assert write.is_error is False
+    assert (extra / "new.txt").read_text(encoding="utf-8") == "x"
+    assert read.is_error is True

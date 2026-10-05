@@ -117,3 +117,12 @@ def test_unknown_sandbox_is_located(tmp_path: Path) -> None:
         load_settings(_write(tmp_path, text), environ={"NEWBOT_TEST_KEY": "x"})
 
     assert "tools.sandbox" in str(info.value)
+
+
+def test_relative_extra_root_is_rejected(tmp_path: Path) -> None:
+    text = VALID + '\n[tools]\nextraReadDirs = ["relative/dir"]\n'
+
+    with pytest.raises(ConfigLoadError) as info:
+        load_settings(_write(tmp_path, text), environ={"NEWBOT_TEST_KEY": "x"})
+
+    assert "tools.extraReadDirs" in str(info.value)

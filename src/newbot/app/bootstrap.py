@@ -59,7 +59,12 @@ def build_runtime(
         notice_stream = sys.stderr if stderr is None else stderr
         notice_stream.write(f"warning: {sandbox.notice}\n")
     registry = build_default_registry(
-        WorkspaceGuard(workspace_root),
+        WorkspaceGuard(
+            workspace_root,
+            read_roots=settings.tools.extra_read_dirs,
+            write_roots=settings.tools.extra_write_dirs,
+            write_files=settings.tools.extra_write_files,
+        ),
         network_guard=NetworkGuard(allowed_cidrs=settings.tools.ssrf_whitelist),
         sandbox=sandbox.backend,
         allowlist=settings.agent.tools,

@@ -49,3 +49,56 @@ def test_display_is_workspace_relative(tmp_path: Path) -> None:
     guard = WorkspaceGuard(tmp_path)
 
     assert guard.display(guard.resolve("a.txt", Capability.READ)) == "a.txt"
+
+
+def test_read_root_allows_reads_only(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    extra = tmp_path / "knowledge"
+    extra.mkdir()
+    guard = WorkspaceGuard(root, read_roots=[extra])
+
+    assert guard.resolve(str(extra / "doc.md"), Capability.READ) == (
+        extra / "doc.md"
+    ).resolve()
+    with pytest.raises(PathAccessDenied):
+        guard.resolve(str(extra / "doc.md"), Capability.WRITE)
+
+
+def test_write_root_allows_writes_only(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    extra = tmp_path / "outbox"
+    extra.mkdir()
+    guard = WorkspaceGuard(root, write_roots=[extra])
+
+    assert guard.resolve(str(extra / "out.txt"), Capability.WRITE) == (
+        extra / "out.txt"
+    ).resolve()
+    with pytest.raises(PathAccessDenied):
+        guard.resolve(str(extra / "out.txt"), Capability.READ)
+
+
+def test_write_file_allowlist_is_exact(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    target = tmp_path / "etc" / "app.conf"
+    target.parent.mkdir()
+    guard = WorkspaceGuard(root, write_files=[target])
+
+    assert guard.resolve(str(target), Capability.WRITE) == target.resolve()
+    with pytest.raises(PathAccessDenied):
+        guard.resolve(str(target.parent / "other.conf"), Capability.WRITE)
+    with pytest.raises(PathAccessDenied):
+        guard.resolve(str(target), Capability.READ)
+
+
+def test_extra_root_traversal_is_denied(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    extra = tmp_path / "knowledge"
+    extra.mkdir()
+    guard = WorkspaceGuard(root, read_roots=[extra])
+
+    with pytest.raises(PathAccessDenied):
+        guard.resolve(str(extra / ".." / "secret.txt"), Capability.READ)
