@@ -361,7 +361,8 @@ Memory has two tiers with different guarantees.
   model continues from the summary; original turns remain in saved history.
 - **Curation.** A scheduled, lower-frequency job reads new journal entries plus the current
   durable files and makes the *smallest coherent edits* to `knowledge.md`/`user.md`/`persona.md`.
-  It is interpretive, not a rewrite.
+  It is interpretive, not a rewrite. The long-running host runs it every
+  `schedule.curationIntervalSeconds` when that is configured.
 - **Versioning.** Every curation write is recorded so the operator can inspect, diff, and
   restore. A curation pass records its edits as one change-set, so the whole pass can be
   reverted together. Versioning is a port (`VersioningPort`); the default adapter is a

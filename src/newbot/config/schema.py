@@ -52,6 +52,12 @@ class SessionSettings(_SettingsModel):
     history_limit: int = Field(default=40, gt=0)
 
 
+class ScheduleSettings(_SettingsModel):
+    """Timed maintenance for the long-running host."""
+
+    curation_interval_seconds: float | None = Field(default=None, gt=0)
+
+
 class ToolsSettings(_SettingsModel):
     """Tool capability policy."""
 
@@ -94,4 +100,5 @@ class Settings(_SettingsModel):
     provider: ProviderSettings
     agent: AgentSettings
     sessions: SessionSettings = Field(default_factory=SessionSettings)
+    schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
     tools: ToolsSettings = Field(default_factory=ToolsSettings)

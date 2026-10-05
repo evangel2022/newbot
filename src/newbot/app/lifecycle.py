@@ -21,7 +21,9 @@ from newbot.app.bootstrap import (
     resolve_workspace_root,
     vault_dir,
 )
+from newbot.app.scheduler import Job, Scheduler
 from newbot.config.schema import Settings
+from newbot.domain.curation import CurationOutcome
 from newbot.domain.envelope import InboundEnvelope
 from newbot.domain.errors import NewbotError, VersionError
 from newbot.domain.session import SessionKey
@@ -29,6 +31,7 @@ from newbot.memory.consolidator import Consolidator
 from newbot.memory.curator import Curator
 from newbot.memory.layout import MemoryLayout
 from newbot.policy.redaction import Redactor
+from newbot.ports.provider import ProviderPort
 from newbot.session.manager import SessionManager
 
 _CONVERSATION_ID = "default"
@@ -232,24 +235,10 @@ async def _curate_memory(
     """Run one curation pass over the workspace's durable memory files."""
     provider = provider_factory(settings.provider)
     try:
-        layout = MemoryLayout(resolve_workspace_root(settings))
-        curator = Curator(
-            layout=layout,
-            journal=JsonlJournal(layout.journal),
-            cursors=JsonCursors(layout.cursors),
-            versioning=FsVault(vault_dir(settings), layout.workspace_root),
-            redactor=Redactor(configured_secrets(settings)),
-            interpreter=ProviderCurator(provider, model=settings.agent.model),
-        )
-        outcome = await curator.run()
+        outcome = await _curate_once(settings, provider)
     finally:
         await provider.aclose()
-    if outcome.changed:
-        stream.write(f"curated {', '.join(outcome.changed)}\n")
-        if outcome.change_set is not None:
-            stream.write(f"change-set {outcome.change_set}\n")
-    else:
-        stream.write("nothing to curate\n")
+    _report_curation(outcome, stream)
 
 
 async def run_curate(
@@ -262,6 +251,70 @@ async def run_curate(
     stream = sys.stdout if stdout is None else stdout
     await _curate_memory(settings, stream=stream, provider_factory=provider_factory)
     return 0
+
+
+async def run_serve(
+    settings: Settings,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+    provider_factory: ProviderFactory = build_provider,
+) -> int:
+    """Run the long-lived host: registered maintenance until shutdown."""
+    stream = sys.stdout if stdout is None else stdout
+    runtime = build_runtime(
+        settings, provider_factory=provider_factory, stdout=stdout, stderr=stderr
+    )
+    scheduler = Scheduler()
+    interval = settings.schedule.curation_interval_seconds
+    if interval is not None:
+        scheduler.every(interval, _curation_job(settings, runtime.provider, stream))
+    stream.write("serving\n")
+    stream.flush()
+    try:
+        await scheduler.run()
+    finally:
+        await runtime.provider.aclose()
+    return 0
+
+
+async def _curate_once(settings: Settings, provider: ProviderPort) -> CurationOutcome:
+    """Apply one curation pass with an already-open provider."""
+    layout = MemoryLayout(resolve_workspace_root(settings))
+    curator = Curator(
+        layout=layout,
+        journal=JsonlJournal(layout.journal),
+        cursors=JsonCursors(layout.cursors),
+        versioning=FsVault(vault_dir(settings), layout.workspace_root),
+        redactor=Redactor(configured_secrets(settings)),
+        interpreter=ProviderCurator(provider, model=settings.agent.model),
+    )
+    return await curator.run()
+
+
+def _report_curation(outcome: CurationOutcome, stream: TextIO) -> None:
+    if outcome.changed:
+        stream.write(f"curated {', '.join(outcome.changed)}\n")
+        if outcome.change_set is not None:
+            stream.write(f"change-set {outcome.change_set}\n")
+    else:
+        stream.write("nothing to curate\n")
+
+
+def _curation_job(settings: Settings, provider: ProviderPort, stream: TextIO) -> Job:
+    """Build the scheduled job that curates memory without killing the host."""
+
+    async def job() -> None:
+        try:
+            outcome = await _curate_once(settings, provider)
+        except NewbotError as exc:
+            stream.write(f"warning: scheduled curation failed: {exc}\n")
+            stream.flush()
+            return
+        _report_curation(outcome, stream)
+        stream.flush()
+
+    return job
 
 
 async def run_memory_log(settings: Settings, *, stdout: TextIO | None = None) -> int:

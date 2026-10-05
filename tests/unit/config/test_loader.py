@@ -45,6 +45,22 @@ model = "gpt-test"
     assert load_settings(_write(tmp_path, text), environ={}).provider.name == "openai_compatible"
 
 
+def test_negative_schedule_interval_is_rejected(tmp_path: Path) -> None:
+    text = """
+[provider]
+baseUrl = "https://api.example.com/v1"
+
+[agent]
+model = "gpt-test"
+
+[schedule]
+curationIntervalSeconds = -1
+"""
+
+    with pytest.raises(ConfigLoadError):
+        load_settings(_write(tmp_path, text), environ={})
+
+
 def test_missing_env_reference_is_located(tmp_path: Path) -> None:
     with pytest.raises(ConfigLoadError) as info:
         load_settings(_write(tmp_path, VALID), environ={})

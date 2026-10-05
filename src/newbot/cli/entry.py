@@ -21,6 +21,7 @@ from newbot.app.lifecycle import (
     run_memory_restore,
     run_memory_revert_set,
     run_once,
+    run_serve,
 )
 from newbot.config.init import InitOutcome, initialize
 from newbot.config.loader import load_settings
@@ -78,6 +79,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "curate", help="fold new memory summaries into durable files"
     )
     curate.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
+    serve = subparsers.add_parser(
+        "serve", help="run scheduled maintenance until stopped"
+    )
+    serve.add_argument(
         "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
     )
     memory = subparsers.add_parser(
@@ -142,6 +149,8 @@ def main(
             )
         if args.command == "curate":
             return asyncio.run(run_curate(settings, provider_factory=provider_factory))
+        if args.command == "serve":
+            return asyncio.run(run_serve(settings, provider_factory=provider_factory))
         if args.command == "memory":
             return _memory_command(args, settings)
         return asyncio.run(
