@@ -8,6 +8,8 @@ from pathlib import Path
 from newbot.domain.curation import CurationEdit, CurationOutcome, DurableFile
 from newbot.domain.errors import CurationError
 from newbot.memory.layout import MemoryLayout
+from newbot.memory.sanitizer import MAX_DURABLE_CHARS, sanitize
+from newbot.policy.redaction import Redactor
 from newbot.ports.memory import CurationPort, CursorPort, JournalPort
 from newbot.ports.versioning import VersioningPort
 
@@ -22,12 +24,14 @@ class Curator:
         journal: JournalPort,
         cursors: CursorPort,
         versioning: VersioningPort,
+        redactor: Redactor,
         interpreter: CurationPort,
     ) -> None:
         self._layout = layout
         self._journal = journal
         self._cursors = cursors
         self._versioning = versioning
+        self._redactor = redactor
         self._interpreter = interpreter
 
     async def run(self) -> CurationOutcome:
@@ -67,10 +71,13 @@ class Curator:
             target = targets.get(edit.path)
             if target is None:
                 raise CurationError(f"curation proposed an unknown file: {edit.path}")
-            if current.get(edit.path) == edit.content:
+            content = sanitize(
+                edit.content, self._redactor, limit=MAX_DURABLE_CHARS
+            )
+            if current.get(edit.path) == content:
                 continue
-            await self._versioning.write(target, edit.content)
-            current[edit.path] = edit.content
+            await self._versioning.write(target, content)
+            current[edit.path] = content
             changed.append(edit.path)
         return tuple(changed)
 

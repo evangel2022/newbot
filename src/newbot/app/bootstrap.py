@@ -65,7 +65,7 @@ def build_runtime(
         sandbox=sandbox.backend,
         allowlist=settings.agent.tools,
         shell_timeout_seconds=settings.tools.shell_timeout_seconds,
-        redactor=Redactor(_configured_secrets(settings)),
+        redactor=Redactor(configured_secrets(settings)),
     )
     agent = AgentDefinition(
         model=settings.agent.model,
@@ -111,7 +111,7 @@ def build_sessions(settings: Settings) -> SessionManager:
     )
 
 
-def _configured_secrets(settings: Settings) -> tuple[str, ...]:
+def configured_secrets(settings: Settings) -> tuple[str, ...]:
     """Runtime secret values that must never reach model context or storage (S6)."""
     api_key = settings.provider.api_key
     return (api_key,) if api_key else ()

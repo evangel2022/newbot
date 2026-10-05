@@ -41,12 +41,3 @@ async def test_malformed_entry_raises_journal_error(tmp_path: Path) -> None:
     with pytest.raises(JournalError):
         await journal.entries()
 
-
-async def test_oversized_summary_is_bounded(tmp_path: Path) -> None:
-    journal = JsonlJournal(tmp_path / "memory" / "journal.jsonl")
-
-    await journal.append("x" * 5000)
-
-    entry = (await journal.entries())[0]
-    assert entry.summary.endswith("...[truncated]")
-    assert len(entry.summary) < 5000

@@ -393,3 +393,82 @@ async def test_memory_log_lists_versions_and_restore_rolls_one_back(
 
     with pytest.raises(VersionError):
         await run_memory_restore(settings, version_id="0" * 16)
+
+
+async def test_run_compact_redacts_secrets_from_the_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "config"))
+    secret = "sk-live-abcdef123456"
+    settings = Settings.model_validate(
+        {
+            "provider": {"base_url": "https://api.example.com/v1", "api_key": secret},
+            "agent": {"model": "gpt-test", "workspace": str(tmp_path / "ws")},
+            "sessions": {"dir": str(tmp_path / "sessions")},
+        }
+    )
+    await run_once(
+        settings,
+        "question",
+        provider_factory=lambda _settings: ScriptedProvider(
+            [Message(role=Role.ASSISTANT, content="reply")]
+        ),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    await run_compact(
+        settings,
+        keep_recent=1,
+        provider_factory=lambda _settings: ScriptedProvider(
+            [Message(role=Role.ASSISTANT, content=f"token {secret}")]
+        ),
+        stdout=io.StringIO(),
+    )
+
+    persisted = (tmp_path / "ws" / "memory" / "journal.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert secret not in persisted
+    assert "[redacted]" in persisted
+
+
+async def test_run_curate_redacts_secrets_before_writing_durable_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "config"))
+    secret = "sk-live-abcdef123456"
+    settings = Settings.model_validate(
+        {
+            "provider": {"base_url": "https://api.example.com/v1", "api_key": secret},
+            "agent": {"model": "gpt-test", "workspace": str(tmp_path / "ws")},
+            "sessions": {"dir": str(tmp_path / "sessions")},
+        }
+    )
+    layout = MemoryLayout(tmp_path / "ws")
+    await JsonlJournal(layout.journal).append("summary")
+    planner = ScriptedProvider(
+        [
+            Message(
+                role=Role.ASSISTANT,
+                content=json.dumps(
+                    {
+                        "files": [
+                            {
+                                "path": "memory/knowledge.md",
+                                "content": f"token {secret}",
+                            }
+                        ]
+                    }
+                ),
+            )
+        ]
+    )
+
+    code = await run_curate(
+        settings, provider_factory=lambda _settings: planner, stdout=io.StringIO()
+    )
+
+    assert code == 0
+    written = layout.knowledge.read_text(encoding="utf-8")
+    assert secret not in written
+    assert "[redacted]" in written

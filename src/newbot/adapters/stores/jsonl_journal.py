@@ -12,9 +12,6 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from newbot.domain.errors import JournalError
 from newbot.domain.journal import JournalEntry
 
-_MAX_SUMMARY = 4000
-_TRUNCATED = "...[truncated]"
-
 
 class _WireEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -40,7 +37,7 @@ class JsonlJournal:
     def _append(self, summary: str) -> None:
         payload = {
             "timestamp": datetime.now(UTC).isoformat(),
-            "summary": _bounded(summary),
+            "summary": summary,
         }
         line = json.dumps(payload, ensure_ascii=False)
         try:
@@ -82,9 +79,3 @@ def _parse_entry(line: str, filename: str, number: int) -> _WireEntry:
             f"invalid journal entry in {filename} line {number}: {exc}"
         ) from exc
 
-
-def _bounded(summary: str) -> str:
-    text = summary.strip()
-    if len(text) <= _MAX_SUMMARY:
-        return text
-    return text[:_MAX_SUMMARY] + _TRUNCATED

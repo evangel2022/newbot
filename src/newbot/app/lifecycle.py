@@ -16,6 +16,7 @@ from newbot.adapters.transports.cli import CliTransport
 from newbot.app.bootstrap import (
     build_runtime,
     build_sessions,
+    configured_secrets,
     resolve_workspace_root,
     vault_dir,
 )
@@ -23,8 +24,10 @@ from newbot.config.schema import Settings
 from newbot.domain.envelope import InboundEnvelope
 from newbot.domain.errors import VersionError
 from newbot.domain.session import SessionKey
+from newbot.memory.consolidator import Consolidator
 from newbot.memory.curator import Curator
 from newbot.memory.layout import MemoryLayout
+from newbot.policy.redaction import Redactor
 
 _CONVERSATION_ID = "default"
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
@@ -108,7 +111,11 @@ async def run_compact(
     """Fold a CLI session's older history into a summary checkpoint."""
     stream = sys.stdout if stdout is None else stdout
     provider = provider_factory(settings.provider)
-    journal = JsonlJournal(MemoryLayout(resolve_workspace_root(settings)).journal)
+    layout = MemoryLayout(resolve_workspace_root(settings))
+    consolidator = Consolidator(
+        journal=JsonlJournal(layout.journal),
+        redactor=Redactor(configured_secrets(settings)),
+    )
     summary: str | None = None
     try:
         summary = await build_sessions(settings).compact(
@@ -117,7 +124,7 @@ async def run_compact(
             keep_recent=keep_recent,
         )
         if summary is not None:
-            await journal.append(summary)
+            await consolidator.consolidate(summary)
     finally:
         await provider.aclose()
     stream.write("compacted\n" if summary is not None else "nothing to compact\n")
@@ -140,6 +147,7 @@ async def run_curate(
             journal=JsonlJournal(layout.journal),
             cursors=JsonCursors(layout.cursors),
             versioning=FsVault(vault_dir(settings), layout.workspace_root),
+            redactor=Redactor(configured_secrets(settings)),
             interpreter=ProviderCurator(provider, model=settings.agent.model),
         )
         outcome = await curator.run()

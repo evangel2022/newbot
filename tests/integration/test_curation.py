@@ -13,6 +13,7 @@ from newbot.domain.curation import CurationEdit, CurationOutcome
 from newbot.domain.errors import CurationError
 from newbot.memory.curator import Curator
 from newbot.memory.layout import MemoryLayout
+from newbot.policy.redaction import Redactor
 from support import ScriptedCurator
 
 _Parts = tuple[MemoryLayout, JsonlJournal, JsonCursors, FsVault]
@@ -28,13 +29,16 @@ def _parts(tmp_path: Path) -> _Parts:
     )
 
 
-def _curator(parts: _Parts, interpreter: ScriptedCurator) -> Curator:
+def _curator(
+    parts: _Parts, interpreter: ScriptedCurator, redactor: Redactor | None = None
+) -> Curator:
     layout, journal, cursors, vault = parts
     return Curator(
         layout=layout,
         journal=journal,
         cursors=cursors,
         versioning=vault,
+        redactor=Redactor(()) if redactor is None else redactor,
         interpreter=interpreter,
     )
 
@@ -127,3 +131,18 @@ async def test_curation_offers_existing_durable_content_to_the_interpreter(
 
     files = interpreter.calls[0][1]
     assert [file.content for file in files] == ["voice", "", ""]
+
+
+async def test_curation_redacts_secrets_before_writing(tmp_path: Path) -> None:
+    parts = _parts(tmp_path)
+    layout, journal, _, _ = parts
+    await journal.append("summary")
+    interpreter = ScriptedCurator(
+        [CurationEdit(path="memory/knowledge.md", content="token sk-live-secret")]
+    )
+
+    await _curator(parts, interpreter, Redactor(["sk-live-secret"])).run()
+
+    written = layout.knowledge.read_text(encoding="utf-8")
+    assert "sk-live-secret" not in written
+    assert "[redacted]" in written
