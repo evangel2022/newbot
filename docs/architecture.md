@@ -364,8 +364,10 @@ Memory has two tiers with different guarantees.
   It is interpretive, not a rewrite.
 - **Versioning.** Every curation write is recorded so the operator can inspect, diff, and
   restore. Versioning is a port (`VersioningPort`); the default adapter is a file-system vault.
-- **Inspection commands.** `/compact`, `/curate`, `/curate-log`, `/curate-restore`,
-  `/curate-guide` expose the process; automatic memory must remain inspectable and reversible.
+- **Inspection commands.** An interactive session accepts `/compact`, `/curate`, `/help`, and
+  `/exit`; the same work is available one-shot as `newbot compact`, `newbot curate`,
+  `newbot memory log`, and `newbot memory restore <version>`. Automatic memory must remain
+  inspectable and reversible.
 - **Context-pollution guard.** Journal entries and durable files are sanitized at write time
   (C7): no raw tool echoes, no unbounded metadata, no local paths that would teach the model to
   imitate internal markers.

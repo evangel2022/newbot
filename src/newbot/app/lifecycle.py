@@ -14,6 +14,7 @@ from newbot.adapters.stores.jsonl_journal import JsonlJournal
 from newbot.adapters.summarizers.provider import ProviderSummarizer
 from newbot.adapters.transports.cli import CliTransport
 from newbot.app.bootstrap import (
+    Runtime,
     build_runtime,
     build_sessions,
     configured_secrets,
@@ -28,10 +29,19 @@ from newbot.memory.consolidator import Consolidator
 from newbot.memory.curator import Curator
 from newbot.memory.layout import MemoryLayout
 from newbot.policy.redaction import Redactor
+from newbot.session.manager import SessionManager
 
 _CONVERSATION_ID = "default"
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
 _PROMPT = "you> "
+DEFAULT_KEEP_RECENT = 8
+_COMMANDS_HELP = (
+    "commands:\n"
+    "  /compact  summarize older history into a checkpoint\n"
+    "  /curate   fold new summaries into durable memory files\n"
+    "  /help     show this help\n"
+    "  /exit     leave the session\n"
+)
 
 
 async def run_once(
@@ -71,7 +81,8 @@ async def run_interactive(
 
     Every line becomes one turn in a single persistent session, so history
     accumulates during the process and across ``newbot run`` (same
-    conversation). A failed turn is reported and the loop continues.
+    conversation). A line starting with ``/`` is a session command. A failed
+    turn is reported and the loop continues.
     """
     runtime = build_runtime(
         settings, provider_factory=provider_factory, stdout=stdout, stderr=stderr
@@ -89,6 +100,15 @@ async def run_interactive(
                 break
             if not text:
                 continue
+            if text.startswith("/"):
+                await _run_command(
+                    text,
+                    runtime=runtime,
+                    settings=settings,
+                    stream=prompt,
+                    provider_factory=provider_factory,
+                )
+                continue
             await runtime.hub.submit(
                 InboundEnvelope(
                     transport=runtime.transport.transport_id,
@@ -101,15 +121,40 @@ async def run_interactive(
     return 0
 
 
-async def run_compact(
+async def _run_command(
+    command: str,
+    *,
+    runtime: Runtime,
     settings: Settings,
+    stream: TextIO,
+    provider_factory: ProviderFactory,
+) -> None:
+    """Run an interactive session command against the live runtime."""
+    if command == "/compact":
+        await _compact_session(
+            settings,
+            runtime.sessions,
+            keep_recent=DEFAULT_KEEP_RECENT,
+            stream=stream,
+            provider_factory=provider_factory,
+        )
+    elif command == "/curate":
+        await _curate_memory(settings, stream=stream, provider_factory=provider_factory)
+    elif command == "/help":
+        stream.write(_COMMANDS_HELP)
+    else:
+        stream.write(f"unknown command: {command}\n")
+
+
+async def _compact_session(
+    settings: Settings,
+    sessions: SessionManager,
     *,
     keep_recent: int,
-    stdout: TextIO | None = None,
-    provider_factory: ProviderFactory = build_provider,
-) -> int:
-    """Fold a CLI session's older history into a summary checkpoint."""
-    stream = sys.stdout if stdout is None else stdout
+    stream: TextIO,
+    provider_factory: ProviderFactory,
+) -> None:
+    """Fold older session history into a checkpoint and journal its summary."""
     provider = provider_factory(settings.provider)
     layout = MemoryLayout(resolve_workspace_root(settings))
     consolidator = Consolidator(
@@ -118,7 +163,7 @@ async def run_compact(
     )
     summary: str | None = None
     try:
-        summary = await build_sessions(settings).compact(
+        summary = await sessions.compact(
             SessionKey(transport=CliTransport.transport_id, conversation=_CONVERSATION_ID),
             ProviderSummarizer(provider, model=settings.agent.model),
             keep_recent=keep_recent,
@@ -128,17 +173,34 @@ async def run_compact(
     finally:
         await provider.aclose()
     stream.write("compacted\n" if summary is not None else "nothing to compact\n")
-    return 0
 
 
-async def run_curate(
+async def run_compact(
     settings: Settings,
     *,
+    keep_recent: int,
     stdout: TextIO | None = None,
     provider_factory: ProviderFactory = build_provider,
 ) -> int:
-    """Run one curation pass over the workspace's durable memory files."""
+    """Fold a CLI session's older history into a summary checkpoint."""
     stream = sys.stdout if stdout is None else stdout
+    await _compact_session(
+        settings,
+        build_sessions(settings),
+        keep_recent=keep_recent,
+        stream=stream,
+        provider_factory=provider_factory,
+    )
+    return 0
+
+
+async def _curate_memory(
+    settings: Settings,
+    *,
+    stream: TextIO,
+    provider_factory: ProviderFactory,
+) -> None:
+    """Run one curation pass over the workspace's durable memory files."""
     provider = provider_factory(settings.provider)
     try:
         layout = MemoryLayout(resolve_workspace_root(settings))
@@ -157,6 +219,17 @@ async def run_curate(
         stream.write(f"curated {', '.join(outcome.changed)}\n")
     else:
         stream.write("nothing to curate\n")
+
+
+async def run_curate(
+    settings: Settings,
+    *,
+    stdout: TextIO | None = None,
+    provider_factory: ProviderFactory = build_provider,
+) -> int:
+    """Run one curation pass over the workspace's durable memory files."""
+    stream = sys.stdout if stdout is None else stdout
+    await _curate_memory(settings, stream=stream, provider_factory=provider_factory)
     return 0
 
 

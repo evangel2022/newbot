@@ -36,6 +36,7 @@ class Runtime:
     engine: TurnEngine
     provider: ProviderPort
     transport: CliTransport
+    sessions: SessionManager
 
 
 def build_runtime(
@@ -84,7 +85,13 @@ def build_runtime(
     hub.bind_inbound(engine.handle)
     hub.register_transport(transport)
     hub.subscribe(transport)
-    return Runtime(hub=hub, engine=engine, provider=provider, transport=transport)
+    return Runtime(
+        hub=hub,
+        engine=engine,
+        provider=provider,
+        transport=transport,
+        sessions=sessions,
+    )
 
 
 def _workspace_id(root: Path) -> str:

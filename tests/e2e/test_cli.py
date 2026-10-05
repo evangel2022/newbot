@@ -174,6 +174,90 @@ def test_cli_interactive_exit_command_stops_without_a_turn(tmp_path: Path) -> No
     assert provider.requests == []
 
 
+def test_cli_interactive_help_lists_commands(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    provider = FakeProvider(reply_events("unused"))
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: provider,
+        stdin=io.StringIO("/help\n/exit\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "commands:" in captured.out
+    assert "/compact" in captured.out
+    assert provider.requests == []
+
+
+def test_cli_interactive_unknown_command_is_reported(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    provider = FakeProvider(reply_events("unused"))
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: provider,
+        stdin=io.StringIO("/bogus\n/exit\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "unknown command: /bogus" in captured.out
+    assert provider.requests == []
+
+
+def test_cli_interactive_compact_folds_the_recorded_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    for index in range(5):
+        main(
+            ["run", "-m", f"q{index}", "--config", str(config)],
+            provider_factory=lambda _settings, i=index: ScriptedProvider(
+                [Message(role=Role.ASSISTANT, content=f"a{i}")]
+            ),
+        )
+    capsys.readouterr()
+    summarizer = ScriptedProvider([Message(role=Role.ASSISTANT, content="brief")])
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: summarizer,
+        stdin=io.StringIO("/compact\n/exit\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "compacted" in captured.out
+    assert [message.content for message in summarizer.requests[0].messages] == [
+        "q0",
+        "a0",
+    ]
+
+
+def test_cli_interactive_curate_reports_nothing_to_curate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    provider = FakeProvider(reply_events("unused"))
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: provider,
+        stdin=io.StringIO("/curate\n/exit\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "nothing to curate" in captured.out
+    assert provider.requests == []
+
+
 class _InterruptingStdin:
     def readline(self) -> str:
         raise KeyboardInterrupt

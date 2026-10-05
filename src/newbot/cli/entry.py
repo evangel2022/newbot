@@ -13,6 +13,7 @@ from typing import TextIO
 from newbot import __version__
 from newbot.adapters.providers.registry import ProviderFactory, build_provider
 from newbot.app.lifecycle import (
+    DEFAULT_KEEP_RECENT,
     run_compact,
     run_curate,
     run_interactive,
@@ -69,7 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
     compact.add_argument(
         "--keep-recent",
         type=_non_negative,
-        default=8,
+        default=DEFAULT_KEEP_RECENT,
         help="recent messages to keep verbatim",
     )
     curate = subparsers.add_parser(
