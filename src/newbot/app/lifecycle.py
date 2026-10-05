@@ -23,7 +23,7 @@ from newbot.app.bootstrap import (
 )
 from newbot.config.schema import Settings
 from newbot.domain.envelope import InboundEnvelope
-from newbot.domain.errors import VersionError
+from newbot.domain.errors import NewbotError, VersionError
 from newbot.domain.session import SessionKey
 from newbot.memory.consolidator import Consolidator
 from newbot.memory.curator import Curator
@@ -64,6 +64,7 @@ async def run_once(
                 text=message,
             )
         )
+        await _auto_compact(settings, runtime, stderr=stderr)
     finally:
         await runtime.provider.aclose()
     return runtime.transport.exit_code
@@ -116,6 +117,7 @@ async def run_interactive(
                     text=text,
                 )
             )
+            await _auto_compact(settings, runtime, stderr=stderr)
     finally:
         await runtime.provider.aclose()
     return 0
@@ -156,23 +158,50 @@ async def _compact_session(
 ) -> None:
     """Fold older session history into a checkpoint and journal its summary."""
     provider = provider_factory(settings.provider)
-    layout = MemoryLayout(resolve_workspace_root(settings))
-    consolidator = Consolidator(
-        journal=JsonlJournal(layout.journal),
-        redactor=Redactor(configured_secrets(settings)),
-    )
     summary: str | None = None
     try:
         summary = await sessions.compact(
-            SessionKey(transport=CliTransport.transport_id, conversation=_CONVERSATION_ID),
+            _cli_session_key(),
             ProviderSummarizer(provider, model=settings.agent.model),
             keep_recent=keep_recent,
         )
         if summary is not None:
-            await consolidator.consolidate(summary)
+            await _build_consolidator(settings).consolidate(summary)
     finally:
         await provider.aclose()
     stream.write("compacted\n" if summary is not None else "nothing to compact\n")
+
+
+async def _auto_compact(
+    settings: Settings, runtime: Runtime, *, stderr: TextIO | None
+) -> None:
+    """Compact a saturated session after a turn.
+
+    Compaction is maintenance on a turn that already succeeded, so a failure is
+    reported to the operator and the completed turn keeps its result.
+    """
+    try:
+        summary = await runtime.sessions.compact_when_saturated(
+            _cli_session_key(),
+            ProviderSummarizer(runtime.provider, model=settings.agent.model),
+        )
+        if summary is not None:
+            await _build_consolidator(settings).consolidate(summary)
+    except NewbotError as exc:
+        stream = sys.stderr if stderr is None else stderr
+        stream.write(f"warning: session compaction failed: {exc}\n")
+
+
+def _cli_session_key() -> SessionKey:
+    return SessionKey(transport=CliTransport.transport_id, conversation=_CONVERSATION_ID)
+
+
+def _build_consolidator(settings: Settings) -> Consolidator:
+    layout = MemoryLayout(resolve_workspace_root(settings))
+    return Consolidator(
+        journal=JsonlJournal(layout.journal),
+        redactor=Redactor(configured_secrets(settings)),
+    )
 
 
 async def run_compact(

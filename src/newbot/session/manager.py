@@ -47,6 +47,41 @@ class SessionManager:
         checkpoint, tail = _split_at_last_checkpoint(records)
         if len(tail) <= keep_recent:
             return None
+        return await self._rewrite_with_summary(
+            key, checkpoint, tail, summarizer, keep_recent=keep_recent
+        )
+
+    async def compact_when_saturated(
+        self, key: SessionKey, summarizer: SummarizerPort
+    ) -> str | None:
+        """Fold the older half of an over-full replay window; else None.
+
+        The replay window is ``history_limit`` messages. Once more messages are
+        recorded after the last checkpoint than that window can replay, the
+        oldest half is folded into a fresh checkpoint so recent turns keep a
+        full window without summarizing a single message at a time.
+        """
+        records = await self._store.load(self._workspace_id, key)
+        checkpoint, tail = _split_at_last_checkpoint(records)
+        if len(tail) <= self._history_limit:
+            return None
+        return await self._rewrite_with_summary(
+            key,
+            checkpoint,
+            tail,
+            summarizer,
+            keep_recent=max(1, self._history_limit // 2),
+        )
+
+    async def _rewrite_with_summary(
+        self,
+        key: SessionKey,
+        checkpoint: CheckpointRecord | None,
+        tail: Sequence[MessageRecord],
+        summarizer: SummarizerPort,
+        *,
+        keep_recent: int,
+    ) -> str:
         drop = len(tail) - keep_recent
         summary = await summarizer.summarize(_replayable(checkpoint, tail[:drop]))
         rewritten: tuple[SessionRecord, ...] = (

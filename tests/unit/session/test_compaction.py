@@ -75,3 +75,36 @@ async def test_compaction_is_a_no_op_when_history_fits() -> None:
     assert await manager.compact(KEY, summarizer, keep_recent=8) is None
     assert summarizer.inputs == []
     assert len(store.records[("ws", "test", "c1")]) == 1
+
+
+async def test_auto_compaction_waits_until_the_window_is_exceeded() -> None:
+    store = MemorySessionStore()
+    manager = SessionManager(store, workspace_id="ws", history_limit=4)
+    await manager.record(
+        KEY, tuple(Message(role=Role.USER, content=f"m{index}") for index in range(4))
+    )
+    summarizer = FakeSummarizer()
+
+    assert await manager.compact_when_saturated(KEY, summarizer) is None
+    assert summarizer.inputs == []
+    assert len(store.records[("ws", "test", "c1")]) == 4
+
+
+async def test_auto_compaction_folds_the_older_half_of_a_saturated_window() -> None:
+    store = MemorySessionStore()
+    manager = SessionManager(store, workspace_id="ws", history_limit=4)
+    messages = tuple(
+        Message(role=Role.USER, content=f"m{index}") for index in range(6)
+    )
+    await manager.record(KEY, messages)
+    summarizer = FakeSummarizer(summary="folded")
+
+    changed = await manager.compact_when_saturated(KEY, summarizer)
+
+    assert changed == "folded"
+    assert summarizer.inputs == [messages[:4]]
+    assert await manager.history(KEY) == (
+        Message(role=Role.SYSTEM, content="folded"),
+        messages[4],
+        messages[5],
+    )

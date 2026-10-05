@@ -307,6 +307,77 @@ async def test_run_compact_reports_when_history_already_fits(tmp_path: Path) -> 
     assert not (tmp_path / "ws" / "memory" / "journal.jsonl").exists()
 
 
+async def test_run_once_compacts_a_saturated_session_and_journals_it(
+    tmp_path: Path,
+) -> None:
+    settings = _settings_in_workspace(tmp_path)
+    sessions = settings.sessions.model_copy(update={"history_limit": 2})
+    settings = settings.model_copy(update={"sessions": sessions})
+    provider = ScriptedProvider(
+        [
+            Message(role=Role.ASSISTANT, content="a0"),
+            Message(role=Role.ASSISTANT, content="a1"),
+            Message(role=Role.ASSISTANT, content="summary of early turns"),
+        ]
+    )
+
+    await run_once(
+        settings,
+        "q0",
+        provider_factory=lambda _settings: provider,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    await run_once(
+        settings,
+        "q1",
+        provider_factory=lambda _settings: provider,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    assert [message.content for message in provider.requests[2].messages] == [
+        "q0",
+        "a0",
+        "q1",
+    ]
+    entries = await JsonlJournal(tmp_path / "ws" / "memory" / "journal.jsonl").entries()
+    assert [entry.summary for entry in entries] == ["summary of early turns"]
+
+
+async def test_auto_compaction_failure_does_not_fail_the_turn(tmp_path: Path) -> None:
+    settings = _settings_in_workspace(tmp_path)
+    sessions = settings.sessions.model_copy(update={"history_limit": 2})
+    settings = settings.model_copy(update={"sessions": sessions})
+    provider = ScriptedProvider(
+        [
+            Message(role=Role.ASSISTANT, content="a0"),
+            Message(role=Role.ASSISTANT, content="a1"),
+            Message(role=Role.ASSISTANT, content=""),
+        ]
+    )
+
+    await run_once(
+        settings,
+        "q0",
+        provider_factory=lambda _settings: provider,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    stderr = io.StringIO()
+
+    code = await run_once(
+        settings,
+        "q1",
+        provider_factory=lambda _settings: provider,
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "session compaction failed" in stderr.getvalue()
+
+
 async def test_run_curate_folds_new_summaries_into_durable_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
