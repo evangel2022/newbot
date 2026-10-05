@@ -286,3 +286,29 @@ def test_cli_curate_reports_nothing_to_curate(
     assert code == 0
     assert captured.out == "nothing to curate\n"
     assert provider.requests == []
+
+
+def test_cli_memory_log_reports_no_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "cfg"))
+    config = _write_config(tmp_path)
+
+    code = main(["memory", "log", "--config", str(config)])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == "no memory versions\n"
+
+
+def test_cli_memory_restore_rejects_an_unknown_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    result = _run_cli(
+        "memory", "restore", "0" * 16, "--config", str(_write_config(tmp_path))
+    )
+
+    assert result.returncode == 1
+    assert "unknown memory version" in result.stderr

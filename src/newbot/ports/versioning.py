@@ -15,6 +15,10 @@ class VersioningPort(Protocol):
         """Write ``content`` to ``path`` and record it as a version."""
         ...
 
+    async def versions(self) -> tuple[FileVersion, ...]:
+        """Return every recorded version, newest first."""
+        ...
+
     async def history(self, path: Path) -> tuple[FileVersion, ...]:
         """Return the recorded versions of ``path``, newest first."""
         ...

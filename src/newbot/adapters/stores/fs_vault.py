@@ -51,6 +51,10 @@ class FsVault:
         async with self._lock:
             return await asyncio.to_thread(self._history, path)
 
+    async def versions(self) -> tuple[FileVersion, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(self._versions)
+
     async def read(self, path: Path, version_id: str) -> str:
         async with self._lock:
             return await asyncio.to_thread(self._read, path, version_id)
@@ -61,7 +65,7 @@ class FsVault:
 
     def _write(self, path: Path, content: str) -> str:
         relative = self._relative(path)
-        version_id = _digest(content)
+        version_id = _digest(relative, content)
         self._store_version(relative, version_id, content)
         self._write_file(path, content, relative)
         return version_id
@@ -79,6 +83,9 @@ class FsVault:
             for version in reversed(self._read_index())
             if version.path == relative
         )
+
+    def _versions(self) -> tuple[FileVersion, ...]:
+        return tuple(reversed(self._read_index()))
 
     def _read(self, path: Path, version_id: str) -> str:
         relative = self._relative(path)
@@ -166,8 +173,9 @@ class FsVault:
             handle.write(f"{payload}\n")
 
 
-def _digest(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:_VERSION_LENGTH]
+def _digest(relative: str, content: str) -> str:
+    payload = f"{relative}\x00{content}".encode()
+    return hashlib.sha256(payload).hexdigest()[:_VERSION_LENGTH]
 
 
 def _parse_version(line: str, number: int) -> FileVersion:

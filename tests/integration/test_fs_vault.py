@@ -49,6 +49,32 @@ async def test_restore_writes_an_older_version_back(tmp_path: Path) -> None:
     assert len(versions) == 3
 
 
+async def test_versions_lists_every_file_newest_first(tmp_path: Path) -> None:
+    vault, knowledge = _vault(tmp_path)
+    first = await vault.write(knowledge, "one")
+    second = await vault.write(knowledge, "two")
+    persona = await vault.write(knowledge.parent.parent / "persona.md", "voice")
+
+    versions = await vault.versions()
+
+    assert [version.version_id for version in versions] == [persona, second, first]
+    assert [version.path for version in versions] == [
+        "persona.md",
+        "memory/knowledge.md",
+        "memory/knowledge.md",
+    ]
+
+
+async def test_identical_content_in_two_files_records_distinct_versions(
+    tmp_path: Path,
+) -> None:
+    vault, knowledge = _vault(tmp_path)
+    first = await vault.write(knowledge, "same")
+    second = await vault.write(knowledge.parent.parent / "persona.md", "same")
+
+    assert first != second
+
+
 async def test_unknown_or_malformed_version_is_rejected(tmp_path: Path) -> None:
     vault, knowledge = _vault(tmp_path)
     await vault.write(knowledge, "one")

@@ -12,10 +12,18 @@ from typing import TextIO
 
 from newbot import __version__
 from newbot.adapters.providers.registry import ProviderFactory, build_provider
-from newbot.app.lifecycle import run_compact, run_curate, run_interactive, run_once
+from newbot.app.lifecycle import (
+    run_compact,
+    run_curate,
+    run_interactive,
+    run_memory_log,
+    run_memory_restore,
+    run_once,
+)
 from newbot.config.init import InitOutcome, initialize
 from newbot.config.loader import load_settings
 from newbot.config.paths import config_path
+from newbot.config.schema import Settings
 from newbot.domain.errors import ConfigLoadError, NewbotError
 
 _CONFIG_HELP = "path to config.toml"
@@ -70,6 +78,24 @@ def _build_parser() -> argparse.ArgumentParser:
     curate.add_argument(
         "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
     )
+    memory = subparsers.add_parser(
+        "memory", help="inspect and restore durable memory versions"
+    )
+    memory.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+    memory_log = memory_commands.add_parser("log", help="list recorded versions")
+    memory_log.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
+    memory_restore = memory_commands.add_parser(
+        "restore", help="write a recorded version back"
+    )
+    memory_restore.add_argument("version", help="the version id to restore")
+    memory_restore.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
     return parser
 
 
@@ -107,6 +133,8 @@ def main(
             )
         if args.command == "curate":
             return asyncio.run(run_curate(settings, provider_factory=provider_factory))
+        if args.command == "memory":
+            return _memory_command(args, settings)
         return asyncio.run(
             run_interactive(
                 settings,
@@ -135,6 +163,12 @@ def _init_command(args: argparse.Namespace) -> int:
     print(f"created config: {config_file}")
     print(f"created workspace: {workspace}")
     return 0
+
+
+def _memory_command(args: argparse.Namespace, settings: Settings) -> int:
+    if args.memory_command == "restore":
+        return asyncio.run(run_memory_restore(settings, version_id=args.version))
+    return asyncio.run(run_memory_log(settings))
 
 
 def _configure_console() -> None:

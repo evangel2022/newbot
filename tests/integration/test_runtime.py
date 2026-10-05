@@ -12,10 +12,18 @@ import pytest
 from newbot.adapters.stores.fs_vault import FsVault
 from newbot.adapters.stores.jsonl_journal import JsonlJournal
 from newbot.app.bootstrap import vault_dir
-from newbot.app.lifecycle import run_compact, run_curate, run_once
+from newbot.app.lifecycle import (
+    run_compact,
+    run_curate,
+    run_memory_log,
+    run_memory_restore,
+    run_once,
+)
 from newbot.config.schema import Settings
+from newbot.domain.errors import VersionError
 from newbot.domain.message import Message, Role
 from newbot.domain.tool import ToolCall
+from newbot.memory.layout import MemoryLayout
 from support import FailingProvider, FakeProvider, ScriptedProvider, reply_events
 
 
@@ -354,3 +362,34 @@ async def test_run_curate_folds_new_summaries_into_durable_files(
     assert code == 0
     assert stdout.getvalue() == "nothing to curate\n"
     assert second.requests == []
+
+
+async def test_memory_log_lists_versions_and_restore_rolls_one_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "config"))
+    settings = _settings_in_workspace(tmp_path)
+    layout = MemoryLayout(tmp_path / "ws")
+    vault = FsVault(vault_dir(settings), layout.workspace_root)
+    first = await vault.write(layout.knowledge, "v1")
+    second = await vault.write(layout.knowledge, "v2")
+    stdout = io.StringIO()
+
+    code = await run_memory_log(settings, stdout=stdout)
+
+    assert code == 0
+    lines = stdout.getvalue().splitlines()
+    assert len(lines) == 2
+    assert lines[0].split()[0] == second
+    assert lines[0].split()[1] == "memory/knowledge.md"
+    assert lines[1].split()[0] == first
+
+    stdout = io.StringIO()
+    code = await run_memory_restore(settings, version_id=first, stdout=stdout)
+
+    assert code == 0
+    assert stdout.getvalue() == f"restored memory/knowledge.md to {first}\n"
+    assert layout.knowledge.read_text(encoding="utf-8") == "v1"
+
+    with pytest.raises(VersionError):
+        await run_memory_restore(settings, version_id="0" * 16)

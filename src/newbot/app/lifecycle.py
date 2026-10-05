@@ -21,6 +21,7 @@ from newbot.app.bootstrap import (
 )
 from newbot.config.schema import Settings
 from newbot.domain.envelope import InboundEnvelope
+from newbot.domain.errors import VersionError
 from newbot.domain.session import SessionKey
 from newbot.memory.curator import Curator
 from newbot.memory.layout import MemoryLayout
@@ -148,4 +149,42 @@ async def run_curate(
         stream.write(f"curated {', '.join(outcome.changed)}\n")
     else:
         stream.write("nothing to curate\n")
+    return 0
+
+
+async def run_memory_log(settings: Settings, *, stdout: TextIO | None = None) -> int:
+    """Print recorded durable-memory versions, newest first."""
+    stream = sys.stdout if stdout is None else stdout
+    layout = MemoryLayout(resolve_workspace_root(settings))
+    versions = await FsVault(vault_dir(settings), layout.workspace_root).versions()
+    if not versions:
+        stream.write("no memory versions\n")
+        return 0
+    for version in versions:
+        stream.write(
+            f"{version.version_id}  {version.path}  "
+            f"{version.timestamp.isoformat()}  {version.size}\n"
+        )
+    return 0
+
+
+async def run_memory_restore(
+    settings: Settings, *, version_id: str, stdout: TextIO | None = None
+) -> int:
+    """Write a recorded version back to its durable file."""
+    stream = sys.stdout if stdout is None else stdout
+    layout = MemoryLayout(resolve_workspace_root(settings))
+    vault = FsVault(vault_dir(settings), layout.workspace_root)
+    match = next(
+        (
+            version
+            for version in await vault.versions()
+            if version.version_id == version_id
+        ),
+        None,
+    )
+    if match is None:
+        raise VersionError(f"unknown memory version: {version_id}")
+    await vault.restore(layout.workspace_root / match.path, version_id)
+    stream.write(f"restored {match.path} to {version_id}\n")
     return 0
