@@ -30,7 +30,13 @@ def load_settings(
             location=str(resolved_path),
         )
     try:
-        raw = tomllib.loads(resolved_path.read_text(encoding="utf-8"))
+        text = resolved_path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ConfigLoadError(
+            "config file must be UTF-8 encoded", location=str(resolved_path)
+        ) from exc
+    try:
+        raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigLoadError(f"invalid TOML: {exc}", location=str(resolved_path)) from exc
     expanded = _expand_env_refs(raw, env, location="")

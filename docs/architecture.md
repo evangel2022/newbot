@@ -396,7 +396,8 @@ Memory has two tiers with different guarantees.
   environment reference expansion (`${VAR}`) → CLI flags. Resolved once at startup into an
   immutable settings object.
 - **Fail fast.** A missing referenced environment variable or an invalid file raises a typed
-  load error with field locations. Defaults are created only when the file is absent; an
+  load error with field locations. The file is read as UTF-8, tolerating a leading BOM; other
+  encodings raise a located load error. Defaults are created only when the file is absent; an
   invalid file is never "recovered" from.
 - **Key style.** The schema accepts both `camelCase` and `snake_case` on read and writes
   `camelCase` on save, keeping on-disk config stable and unambiguous.

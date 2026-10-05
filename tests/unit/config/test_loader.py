@@ -126,3 +126,23 @@ def test_relative_extra_root_is_rejected(tmp_path: Path) -> None:
         load_settings(_write(tmp_path, text), environ={"NEWBOT_TEST_KEY": "x"})
 
     assert "tools.extraReadDirs" in str(info.value)
+
+
+def test_utf8_bom_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(VALID, encoding="utf-8-sig")
+
+    settings = load_settings(path, environ={"NEWBOT_TEST_KEY": "x"})
+
+    assert settings.agent.model == "gpt-test"
+
+
+def test_non_utf8_config_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_bytes(VALID.encode("utf-16"))
+
+    with pytest.raises(ConfigLoadError) as info:
+        load_settings(path, environ={"NEWBOT_TEST_KEY": "x"})
+
+    assert info.value.location == str(path)
+    assert "UTF-8" in str(info.value)
