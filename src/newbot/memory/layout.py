@@ -33,5 +33,10 @@ class MemoryLayout:
         return self._memory_dir / "cursors.json"
 
     @property
+    def durable_files(self) -> tuple[Path, ...]:
+        """The long-term files curation maintains, in prompt order."""
+        return (self.persona, self.user, self.knowledge)
+
+    @property
     def _memory_dir(self) -> Path:
         return self.workspace_root / "memory"

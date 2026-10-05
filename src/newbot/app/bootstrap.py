@@ -96,6 +96,11 @@ def resolve_workspace_root(settings: Settings) -> Path:
     return (settings.agent.workspace or Path.cwd()).resolve()
 
 
+def vault_dir(settings: Settings) -> Path:
+    """Directory holding durable-file versions for this workspace."""
+    return config_dir() / "vault" / _workspace_id(resolve_workspace_root(settings))
+
+
 def build_sessions(settings: Settings) -> SessionManager:
     """Build the persistent session manager for the CLI conversation."""
     sessions_root = settings.sessions.dir or (config_dir() / "sessions")

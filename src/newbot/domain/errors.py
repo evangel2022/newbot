@@ -43,3 +43,7 @@ class JournalError(NewbotError):
 
 class VersionError(NewbotError):
     """A durable-file version could not be recorded, read, or restored."""
+
+
+class CurationError(NewbotError):
+    """A curation pass could not read, interpret, or apply its edits."""

@@ -12,7 +12,7 @@ from typing import TextIO
 
 from newbot import __version__
 from newbot.adapters.providers.registry import ProviderFactory, build_provider
-from newbot.app.lifecycle import run_compact, run_interactive, run_once
+from newbot.app.lifecycle import run_compact, run_curate, run_interactive, run_once
 from newbot.config.init import InitOutcome, initialize
 from newbot.config.loader import load_settings
 from newbot.config.paths import config_path
@@ -64,6 +64,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=8,
         help="recent messages to keep verbatim",
     )
+    curate = subparsers.add_parser(
+        "curate", help="fold new memory summaries into durable files"
+    )
+    curate.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
     return parser
 
 
@@ -99,6 +105,8 @@ def main(
                     provider_factory=provider_factory,
                 )
             )
+        if args.command == "curate":
+            return asyncio.run(run_curate(settings, provider_factory=provider_factory))
         return asyncio.run(
             run_interactive(
                 settings,

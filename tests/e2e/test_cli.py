@@ -269,3 +269,20 @@ def test_cli_compact_rejects_negative_keep_recent(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "must be zero or greater" in result.stderr
+
+
+def test_cli_curate_reports_nothing_to_curate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    provider = FakeProvider(reply_events("unused"))
+
+    code = main(
+        ["curate", "--config", str(config)],
+        provider_factory=lambda _settings: provider,
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == "nothing to curate\n"
+    assert provider.requests == []

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 
+from newbot.domain.curation import CurationEdit, DurableFile
 from newbot.domain.envelope import OutboundEnvelope
 from newbot.domain.errors import ProviderError
 from newbot.domain.events import AgentEvent
+from newbot.domain.journal import JournalEntry
 from newbot.domain.message import Message, Role
 from newbot.domain.provider import Completed, ModelRequest, StreamEvent, TextDelta
 from newbot.domain.session import SessionKey, SessionRecord
@@ -189,3 +191,17 @@ class FakeSummarizer:
     async def summarize(self, messages: Sequence[Message]) -> str:
         self.inputs.append(tuple(messages))
         return self._summary
+
+
+class ScriptedCurator:
+    """A ``CurationPort`` stub that records its input and replays fixed edits."""
+
+    def __init__(self, edits: Sequence[CurationEdit] = ()) -> None:
+        self._edits = tuple(edits)
+        self.calls: list[tuple[tuple[JournalEntry, ...], tuple[DurableFile, ...]]] = []
+
+    async def interpret(
+        self, entries: Sequence[JournalEntry], files: Sequence[DurableFile]
+    ) -> tuple[CurationEdit, ...]:
+        self.calls.append((tuple(entries), tuple(files)))
+        return self._edits

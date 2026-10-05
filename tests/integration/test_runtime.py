@@ -7,8 +7,12 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
+from newbot.adapters.stores.fs_vault import FsVault
 from newbot.adapters.stores.jsonl_journal import JsonlJournal
-from newbot.app.lifecycle import run_compact, run_once
+from newbot.app.bootstrap import vault_dir
+from newbot.app.lifecycle import run_compact, run_curate, run_once
 from newbot.config.schema import Settings
 from newbot.domain.message import Message, Role
 from newbot.domain.tool import ToolCall
@@ -293,3 +297,60 @@ async def test_run_compact_reports_when_history_already_fits(tmp_path: Path) -> 
     assert provider.requests == []
     assert provider.closed is True
     assert not (tmp_path / "ws" / "memory" / "journal.jsonl").exists()
+
+
+async def test_run_curate_folds_new_summaries_into_durable_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "config"))
+    settings = _settings_in_workspace(tmp_path)
+    await run_once(
+        settings,
+        "question",
+        provider_factory=lambda _settings: ScriptedProvider(
+            [Message(role=Role.ASSISTANT, content="reply")]
+        ),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+    await run_compact(
+        settings,
+        keep_recent=1,
+        provider_factory=lambda _settings: ScriptedProvider(
+            [Message(role=Role.ASSISTANT, content="summarised turn")]
+        ),
+        stdout=io.StringIO(),
+    )
+    planner = ScriptedProvider(
+        [
+            Message(
+                role=Role.ASSISTANT,
+                content=json.dumps(
+                    {"files": [{"path": "memory/knowledge.md", "content": "- fact\n"}]}
+                ),
+            )
+        ]
+    )
+    stdout = io.StringIO()
+
+    code = await run_curate(
+        settings, provider_factory=lambda _settings: planner, stdout=stdout
+    )
+
+    assert code == 0
+    assert stdout.getvalue() == "curated memory/knowledge.md\n"
+    knowledge = tmp_path / "ws" / "memory" / "knowledge.md"
+    assert knowledge.read_text(encoding="utf-8") == "- fact\n"
+    vault = FsVault(vault_dir(settings), tmp_path / "ws")
+    assert len(await vault.history(knowledge)) == 1
+
+    second = ScriptedProvider([Message(role=Role.ASSISTANT, content='{"files": []}')])
+    stdout = io.StringIO()
+
+    code = await run_curate(
+        settings, provider_factory=lambda _settings: second, stdout=stdout
+    )
+
+    assert code == 0
+    assert stdout.getvalue() == "nothing to curate\n"
+    assert second.requests == []
