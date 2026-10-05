@@ -84,6 +84,9 @@ class WorkbenchServer:
 
     Binding to ``127.0.0.1`` is deliberate: the host must not expose itself on a
     public interface before an access-control design exists (S5).
+
+    Turns for one conversation run one at a time so each HTTP request can be
+    matched to its own reply; different conversations still run concurrently.
     """
 
     transport_id = WORKBENCH_TRANSPORT_ID
@@ -95,6 +98,7 @@ class WorkbenchServer:
         self._access = access
         self._submit = submit
         self._pending: dict[str, asyncio.Future[str]] = {}
+        self._turns: dict[str, asyncio.Lock] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: _HttpServer | None = None
         self._thread: threading.Thread | None = None
@@ -189,19 +193,29 @@ class WorkbenchServer:
             self._resolve(event.session.conversation, "")
 
     async def _run(self, conversation: str, text: str) -> str:
-        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        self._pending[conversation] = future
-        try:
-            await self._submit(
-                InboundEnvelope(
-                    transport=self.transport_id,
-                    conversation_id=conversation,
-                    text=text,
+        # The engine already runs one turn per session; this lock is what
+        # makes a reply correlatable: with at most one outstanding future per
+        # conversation a delivery can only belong to the turn that registered
+        # it, so a queued request waits its turn instead of overwriting the
+        # in-flight request's future.
+        lock = self._turns.get(conversation)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._turns[conversation] = lock
+        async with lock:
+            future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+            self._pending[conversation] = future
+            try:
+                await self._submit(
+                    InboundEnvelope(
+                        transport=self.transport_id,
+                        conversation_id=conversation,
+                        text=text,
+                    )
                 )
-            )
-            return await asyncio.wait_for(future, timeout=_REPLY_TIMEOUT)
-        finally:
-            self._pending.pop(conversation, None)
+                return await asyncio.wait_for(future, timeout=_REPLY_TIMEOUT)
+            finally:
+                self._pending.pop(conversation, None)
 
     def _resolve(self, conversation: str, text: str) -> None:
         future = self._pending.get(conversation)
