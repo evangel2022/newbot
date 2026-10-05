@@ -2,19 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Protocol
-
 from newbot.domain.envelope import InboundEnvelope, OutboundEnvelope
 from newbot.domain.events import AgentEvent
 from newbot.ports.events import EventSink
-from newbot.ports.transports import TransportPort
-
-
-class InboundHandler(Protocol):
-    """Handles one inbound envelope; implemented by the turn engine."""
-
-    async def __call__(self, envelope: InboundEnvelope) -> None:
-        ...
+from newbot.ports.transports import InboundHandler, TransportPort
 
 
 class EventHub:

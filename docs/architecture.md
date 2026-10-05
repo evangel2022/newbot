@@ -269,7 +269,7 @@ Rules:
 | --- | --- |
 | `newbot run -m "..."` | One-shot turn; prints the reply; exits. |
 | `newbot` (no args) | Interactive terminal session with persistent history. |
-| `newbot serve` | Long-running host: scheduler + curator + loopback health endpoint (`server.port`). |
+| `newbot serve` | Long-running host: scheduler + curator + loopback workbench transport (HTTP health/capabilities and authed `POST /messages`; `server.port`, `server.token`; ADR-010). |
 | `newbot init` | Create config/workspace defaults (never recovers from an invalid file). |
 
 ### 6.2 Turn lifecycle

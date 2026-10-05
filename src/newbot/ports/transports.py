@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from newbot.domain.envelope import OutboundEnvelope
+from newbot.domain.envelope import InboundEnvelope, OutboundEnvelope
+
+
+class InboundHandler(Protocol):
+    """Receives one inbound envelope; implemented by the turn engine."""
+
+    async def __call__(self, envelope: InboundEnvelope) -> None:
+        """Handle one inbound envelope."""
+        ...
 
 
 class TransportPort(Protocol):

@@ -37,6 +37,8 @@ class CliTransport:
         return 0
 
     async def publish(self, event: AgentEvent) -> None:
+        if event.session.transport != self.transport_id:
+            return
         if isinstance(event, TurnStarted):
             self._failed = False
             self._status = None

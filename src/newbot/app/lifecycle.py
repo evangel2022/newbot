@@ -13,7 +13,7 @@ from newbot.adapters.stores.json_cursors import JsonCursors
 from newbot.adapters.stores.jsonl_journal import JsonlJournal
 from newbot.adapters.summarizers.provider import ProviderSummarizer
 from newbot.adapters.transports.cli import CliTransport
-from newbot.adapters.transports.http_ws import HealthServer
+from newbot.adapters.transports.http_ws import WorkbenchServer
 from newbot.app.bootstrap import (
     Runtime,
     build_runtime,
@@ -31,6 +31,7 @@ from newbot.domain.session import SessionKey
 from newbot.memory.consolidator import Consolidator
 from newbot.memory.curator import Curator
 from newbot.memory.layout import MemoryLayout
+from newbot.policy.access import AccessPolicy
 from newbot.policy.redaction import Redactor
 from newbot.ports.provider import ProviderPort
 from newbot.session.manager import SessionManager
@@ -270,15 +271,21 @@ async def run_serve(
     interval = settings.schedule.curation_interval_seconds
     if interval is not None:
         scheduler.every(interval, _curation_job(settings, runtime.provider, stream))
-    health = HealthServer(port=settings.server.port)
-    health.start()
+    workbench = WorkbenchServer(
+        port=settings.server.port,
+        access=AccessPolicy(settings.server.token),
+        submit=runtime.hub.submit,
+    )
+    runtime.hub.register_transport(workbench)
+    runtime.hub.subscribe(workbench)
+    workbench.start(asyncio.get_running_loop())
     stream.write("serving\n")
-    stream.write(f"health {health.url}\n")
+    stream.write(f"health {workbench.url}\n")
     stream.flush()
     try:
         await scheduler.run()
     finally:
-        await asyncio.to_thread(health.stop)
+        await asyncio.to_thread(workbench.stop)
         await runtime.provider.aclose()
     return 0
 

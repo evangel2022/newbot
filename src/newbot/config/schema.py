@@ -62,6 +62,7 @@ class ServerSettings(_SettingsModel):
     """The loopback HTTP surface of the long-running host."""
 
     port: int = Field(default=8787, ge=0, le=65535)
+    token: str | None = None
 
 
 class ToolsSettings(_SettingsModel):
