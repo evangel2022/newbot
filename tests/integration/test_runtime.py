@@ -155,3 +155,55 @@ async def test_extra_read_root_is_wired_through_the_runtime(tmp_path: Path) -> N
     ]
     assert code == 0
     assert tool_messages[0].content == "reference"
+
+
+async def test_configured_secret_is_redacted_before_it_is_persisted(
+    tmp_path: Path,
+) -> None:
+    secret = "sk-live-abcdef123456"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "creds.txt").write_text(f"token={secret}\n", encoding="utf-8")
+    settings = Settings.model_validate(
+        {
+            "provider": {"base_url": "https://api.example.com/v1", "api_key": secret},
+            "agent": {"model": "gpt-test", "workspace": str(workspace)},
+            "sessions": {"dir": str(tmp_path / "sessions")},
+        }
+    )
+    provider = ScriptedProvider(
+        [
+            Message(
+                role=Role.ASSISTANT,
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="read_file",
+                        arguments=json.dumps({"path": "creds.txt"}),
+                    ),
+                ),
+            ),
+            Message(role=Role.ASSISTANT, content="done"),
+        ]
+    )
+
+    code = await run_once(
+        settings,
+        "read creds.txt",
+        provider_factory=lambda _settings: provider,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
+
+    tool_messages = [
+        message for message in provider.requests[1].messages if message.role is Role.TOOL
+    ]
+    session_files = list((tmp_path / "sessions").rglob("*.jsonl"))
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8") for path in session_files
+    )
+    assert code == 0
+    assert "[redacted]" in tool_messages[0].content
+    assert session_files
+    assert secret not in persisted

@@ -20,6 +20,7 @@ from newbot.core.turn import TurnEngine
 from newbot.domain.agent import AgentDefinition
 from newbot.domain.turn import Budget
 from newbot.policy.network import NetworkGuard
+from newbot.policy.redaction import Redactor
 from newbot.policy.sandbox import build_sandbox
 from newbot.policy.workspace import WorkspaceGuard
 from newbot.ports.provider import ProviderPort
@@ -69,6 +70,7 @@ def build_runtime(
         sandbox=sandbox.backend,
         allowlist=settings.agent.tools,
         shell_timeout_seconds=settings.tools.shell_timeout_seconds,
+        redactor=Redactor(_configured_secrets(settings)),
     )
     agent = AgentDefinition(
         model=settings.agent.model,
@@ -92,3 +94,9 @@ def build_runtime(
 
 def _workspace_id(root: Path) -> str:
     return hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+
+
+def _configured_secrets(settings: Settings) -> tuple[str, ...]:
+    """Runtime secret values that must never reach model context or storage (S6)."""
+    api_key = settings.provider.api_key
+    return (api_key,) if api_key else ()

@@ -8,7 +8,7 @@ from collections.abc import Collection, Mapping, Sequence
 from newbot.domain.errors import NewbotError, ToolError
 from newbot.domain.tool import ToolCall, ToolResult, ToolSpec
 from newbot.policy.network import NetworkGuard
-from newbot.policy.redaction import bound_text
+from newbot.policy.redaction import Redactor, bound_text
 from newbot.policy.sandbox import Sandbox
 from newbot.policy.shell import ShellGuard
 from newbot.policy.workspace import WorkspaceGuard
@@ -23,9 +23,14 @@ class ToolRegistry:
     """Holds enabled tools and normalizes every invocation result."""
 
     def __init__(
-        self, tools: Sequence[Tool], *, allowlist: Collection[str] | None = None
+        self,
+        tools: Sequence[Tool],
+        *,
+        allowlist: Collection[str] | None = None,
+        redactor: Redactor | None = None,
     ) -> None:
         self._tools = _collect(tools, allowlist)
+        self._redactor = redactor
 
     def specs(self) -> tuple[ToolSpec, ...]:
         """Return enabled specs in a deterministic (name-sorted) order."""
@@ -42,10 +47,19 @@ class ToolRegistry:
             arguments = _parse_arguments(call.arguments)
             output = await tool.invoke(arguments, ctx)
         except NewbotError as exc:
-            return ToolResult(call_id=call.id, content=bound_text(str(exc)), is_error=True)
+            return ToolResult(
+                call_id=call.id, content=self._sanitize(str(exc)), is_error=True
+            )
         return ToolResult(
-            call_id=call.id, content=bound_text(output.text), is_error=output.is_error
+            call_id=call.id,
+            content=self._sanitize(output.text),
+            is_error=output.is_error,
         )
+
+    def _sanitize(self, text: str) -> str:
+        if self._redactor is not None:
+            text = self._redactor.redact(text)
+        return bound_text(text)
 
 
 def build_default_registry(
@@ -55,6 +69,7 @@ def build_default_registry(
     sandbox: Sandbox | None = None,
     allowlist: Collection[str] | None = None,
     shell_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    redactor: Redactor | None = None,
 ) -> ToolRegistry:
     """Construct the built-in tool set, filtered by the agent allowlist."""
     workspace_only = WorkspaceGuard(guard.root)
@@ -69,7 +84,7 @@ def build_default_registry(
         ),
         WebFetchTool(network_guard),
     ]
-    return ToolRegistry(tools, allowlist=allowlist)
+    return ToolRegistry(tools, allowlist=allowlist, redactor=redactor)
 
 
 def _collect(
