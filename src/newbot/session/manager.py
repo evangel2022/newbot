@@ -39,6 +39,10 @@ class SessionManager:
         records = [MessageRecord(timestamp=now, message=message) for message in messages]
         await self._store.append(self._workspace_id, key, records)
 
+    async def reset(self, key: SessionKey) -> None:
+        """Discard the session's recorded history, starting it over."""
+        await self._store.rewrite(self._workspace_id, key, ())
+
     async def compact(
         self, key: SessionKey, summarizer: SummarizerPort, *, keep_recent: int
     ) -> str | None:
@@ -48,7 +52,7 @@ class SessionManager:
         if len(tail) <= keep_recent:
             return None
         return await self._rewrite_with_summary(
-            key, checkpoint, tail, summarizer, keep_recent=keep_recent
+            key, records, checkpoint, tail, summarizer, keep_recent=keep_recent
         )
 
     async def compact_when_saturated(
@@ -67,6 +71,7 @@ class SessionManager:
             return None
         return await self._rewrite_with_summary(
             key,
+            records,
             checkpoint,
             tail,
             summarizer,
@@ -76,6 +81,7 @@ class SessionManager:
     async def _rewrite_with_summary(
         self,
         key: SessionKey,
+        records: Sequence[SessionRecord],
         checkpoint: CheckpointRecord | None,
         tail: Sequence[MessageRecord],
         summarizer: SummarizerPort,
@@ -84,9 +90,15 @@ class SessionManager:
     ) -> str:
         drop = len(tail) - keep_recent
         summary = await summarizer.summarize(_replayable(checkpoint, tail[:drop]))
+        # Keep every saved message; the checkpoint only marks the replay boundary.
+        saved = tuple(
+            record for record in records if isinstance(record, MessageRecord)
+        )
+        boundary = len(saved) - keep_recent
         rewritten: tuple[SessionRecord, ...] = (
+            *saved[:boundary],
             CheckpointRecord(timestamp=datetime.now(UTC), summary=summary),
-            *tail[drop:],
+            *saved[boundary:],
         )
         await self._store.rewrite(self._workspace_id, key, rewritten)
         return summary

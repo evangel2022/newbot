@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import datetime
 
 from newbot.domain.curation import CurationEdit, DurableFile
 from newbot.domain.envelope import OutboundEnvelope
-from newbot.domain.errors import ProviderError
+from newbot.domain.errors import ProviderError, TransportError
 from newbot.domain.events import AgentEvent
+from newbot.domain.job import ScheduledJob
 from newbot.domain.journal import JournalEntry
 from newbot.domain.message import Message, Role
 from newbot.domain.provider import Completed, ModelRequest, StreamEvent, TextDelta
@@ -55,6 +57,19 @@ class FailingProvider:
 
     async def aclose(self) -> None:
         return None
+
+
+class FailingTransport:
+    """A transport whose outbound delivery always fails."""
+
+    transport_id = "test"
+
+    def __init__(self) -> None:
+        self.delivered: list[OutboundEnvelope] = []
+
+    async def deliver(self, envelope: OutboundEnvelope) -> None:
+        self.delivered.append(envelope)
+        raise TransportError("transport down")
 
 
 async def _boom() -> AsyncIterator[StreamEvent]:
@@ -179,6 +194,43 @@ class MemorySessionStore:
         self, workspace_id: str, key: SessionKey, records: Sequence[SessionRecord]
     ) -> None:
         self.records[(workspace_id, key.transport, key.conversation)] = list(records)
+
+
+class MemoryJobStore:
+    """In-memory ``JobStorePort`` for unit tests."""
+
+    def __init__(self) -> None:
+        self._items: list[ScheduledJob] = []
+
+    def jobs(self) -> tuple[ScheduledJob, ...]:
+        return tuple(self._items)
+
+    def add(
+        self,
+        *,
+        transport: str,
+        conversation: str,
+        prompt: str,
+        next_run_at: datetime,
+        every_seconds: float | None = None,
+    ) -> ScheduledJob:
+        job = ScheduledJob(
+            id=f"job-{len(self._items) + 1}",
+            transport=transport,
+            conversation=conversation,
+            prompt=prompt,
+            next_run_at=next_run_at,
+            every_seconds=every_seconds,
+        )
+        self._items.append(job)
+        return job
+
+    def remove(self, job_id: str) -> bool:
+        kept = [job for job in self._items if job.id != job_id]
+        if len(kept) == len(self._items):
+            return False
+        self._items = kept
+        return True
 
 
 class FakeSummarizer:

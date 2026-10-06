@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-public-repository-security-vulnerability
+    about: Do not open a public issue. Privately report security problems via the repository's Security tab.
+  - name: Question / discussion
+    url: https://docs.github.com/en/discussions
+    about: Ask usage questions and share ideas in GitHub Discussions when enabled.

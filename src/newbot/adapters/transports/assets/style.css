@@ -1,0 +1,36 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  justify-content: center;
+}
+
+main {
+  width: min(48rem, 100%);
+  padding: 1.5rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+label {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+input {
+  flex: 1;
+}
+
+#transcript {
+  min-height: 12rem;
+  white-space: pre-wrap;
+  border: 1px solid currentColor;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  overflow: auto;
+}

@@ -8,15 +8,19 @@ import http.server
 import io
 import json
 import queue
+import secrets
 import select
 import socket
 import threading
+import time
 from collections.abc import Mapping
-from urllib.parse import parse_qs, urlsplit
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from newbot.adapters.transports.websocket import (
+    MAX_MESSAGE_BYTES,
     WebSocketConnection,
     WebSocketError,
     accept_key,
@@ -35,13 +39,49 @@ from newbot.ports.transports import InboundHandler
 
 WORKBENCH_PROTOCOL = 1
 WORKBENCH_TRANSPORT_ID = "webui"
-CAPABILITIES: tuple[str, ...] = ("chat", "stream")
+CAPABILITIES: tuple[str, ...] = ("chat", "stream", "ticket")
 
 _LOOPBACK = "127.0.0.1"
 _REPLY_TIMEOUT = 120.0
 _STREAM_PATH = "/stream"
+_TICKET_PATH = "/ticket"
 _STREAM_POLL_SECONDS = 0.05
 _MAX_CONVERSATION_CHARS = 200
+_TICKET_PROTOCOL_PREFIX = "newbot.ticket."
+_TICKET_TTL_SECONDS = 30.0
+_ASSET_ROUTE = "/assets/"
+_ASSETS_DIR = Path(__file__).with_name("assets")
+_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+}
+
+
+def _read_asset(route: str) -> tuple[bytes, str] | None:
+    """Read a bundled client asset, resolving strictly inside the asset root (R3)."""
+    if route == "/":
+        name = "index.html"
+    elif route.startswith(_ASSET_ROUTE):
+        name = unquote(route[len(_ASSET_ROUTE) :])
+    else:
+        return None
+    if not name:
+        return None
+    root = _ASSETS_DIR.resolve()
+    try:
+        candidate = (root / name).resolve()
+    except (OSError, ValueError):
+        return None
+    if candidate != root and root not in candidate.parents:
+        return None
+    if not candidate.is_file():
+        return None
+    content_type = _CONTENT_TYPES.get(candidate.suffix, "application/octet-stream")
+    try:
+        return candidate.read_bytes(), content_type
+    except OSError:
+        return None
 
 
 class _MessageRequest(BaseModel):
@@ -83,8 +123,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 status, payload = outcome
                 self._respond(status, payload)
             return
-        status, payload = self.server.workbench.get(self.path)
-        self._respond(status, payload)
+        status, body, content_type = self.server.workbench.get(self.path)
+        self._send(status, body, content_type)
 
     def do_POST(self) -> None:
         length = self.headers.get("Content-Length")
@@ -96,16 +136,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if size < 0:
             self._respond(400, {"error": "invalid Content-Length"})
             return
+        if size > MAX_MESSAGE_BYTES:
+            # Drain a bounded prefix so a cooperating client receives the
+            # rejection without buffering the whole advertised body.
+            self.rfile.read(MAX_MESSAGE_BYTES + 1)
+            self.close_connection = True
+            self._respond(413, {"error": "request body too large"})
+            return
         body = self.rfile.read(size)
-        status, payload = self.server.workbench.messages(
-            self.headers.get("Authorization"), body
-        )
+        authorization = self.headers.get("Authorization")
+        if self.path.split("?", 1)[0] == _TICKET_PATH:
+            status, payload = self.server.workbench.ticket(authorization)
+        else:
+            status, payload = self.server.workbench.messages(authorization, body)
         self._respond(status, payload)
 
     def _respond(self, status: int, payload: dict[str, object]) -> None:
-        body = json.dumps(payload).encode("utf-8")
+        self._send(status, json.dumps(payload).encode("utf-8"), "application/json")
+
+    def _send(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -143,6 +194,8 @@ class WorkbenchServer:
         self._pending: dict[str, asyncio.Future[str]] = {}
         self._turns: dict[str, asyncio.Lock] = {}
         self._streams: dict[str, queue.Queue[str]] = {}
+        self._tickets: dict[str, float] = {}
+        self._tickets_lock = threading.Lock()
         self._stopped = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: _HttpServer | None = None
@@ -188,16 +241,51 @@ class WorkbenchServer:
         self._thread = None
         self._loop = None
 
-    def get(self, path: str) -> tuple[int, dict[str, object]]:
+    def get(self, path: str) -> tuple[int, bytes, str]:
         """Answer a read-only request; no authentication is required (S5)."""
-        if path == "/health":
-            return 200, {"status": "ok"}
-        if path == "/capabilities":
-            return 200, {
-                "protocol": WORKBENCH_PROTOCOL,
-                "capabilities": list(CAPABILITIES),
+        route = urlsplit(path).path
+        if route == "/health":
+            return self._json(200, {"status": "ok"})
+        if route == "/capabilities":
+            return self._json(
+                200,
+                {"protocol": WORKBENCH_PROTOCOL, "capabilities": list(CAPABILITIES)},
+            )
+        asset = _read_asset(route)
+        if asset is not None:
+            body, content_type = asset
+            return 200, body, content_type
+        return self._json(404, {"error": "not found"})
+
+    @staticmethod
+    def _json(status: int, payload: dict[str, object]) -> tuple[int, bytes, str]:
+        return status, json.dumps(payload).encode("utf-8"), "application/json"
+
+    def ticket(self, authorization: str | None) -> tuple[int, dict[str, object]]:
+        """Issue a short-lived, single-use ticket for a browser WebSocket upgrade."""
+        if not self._access.mutating_enabled:
+            return 403, {"error": "mutations are disabled"}
+        if not self._access.allows(authorization):
+            return 401, {"error": "unauthorized"}
+        issued = secrets.token_urlsafe(32)
+        now = time.monotonic()
+        with self._tickets_lock:
+            self._tickets = {
+                key: expiry for key, expiry in self._tickets.items() if expiry > now
             }
-        return 404, {"error": "not found"}
+            self._tickets[issued] = now + _TICKET_TTL_SECONDS
+        return 200, {
+            "ticket": issued,
+            "expiresInSeconds": int(_TICKET_TTL_SECONDS),
+        }
+
+    def _consume_ticket(self, protocol: str) -> bool:
+        """Validate and consume one ticket offered as a WebSocket subprotocol."""
+        value = protocol[len(_TICKET_PROTOCOL_PREFIX) :]
+        now = time.monotonic()
+        with self._tickets_lock:
+            expiry = self._tickets.pop(value, None)
+        return expiry is not None and expiry > now
 
     def messages(
         self, authorization: str | None, body: bytes
@@ -265,14 +353,16 @@ class WorkbenchServer:
         conversation = _conversation_from(path)
         if conversation is None:
             return 400, {"error": "invalid conversation"}
-        handshake = (
-            "HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Accept: {accept_key(headers['sec-websocket-key'])}\r\n"
-            "\r\n"
-        )
-        writer.write(handshake.encode("ascii"))
+        protocol = _ticket_protocol(headers.get("sec-websocket-protocol"))
+        handshake = [
+            "HTTP/1.1 101 Switching Protocols",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            f"Sec-WebSocket-Accept: {accept_key(headers['sec-websocket-key'])}",
+        ]
+        if protocol is not None:
+            handshake.append(f"Sec-WebSocket-Protocol: {protocol}")
+        writer.write(("\r\n".join(handshake) + "\r\n\r\n").encode("ascii"))
         writer.flush()
         connection = WebSocketConnection(reader, writer)
         pending: queue.Queue[str] = queue.Queue()
@@ -294,7 +384,11 @@ class WorkbenchServer:
     ) -> tuple[int, dict[str, object]] | None:
         if not self._access.mutating_enabled:
             return 403, {"error": "mutations are disabled"}
-        if not self._access.allows(headers.get("authorization")):
+        ticket = _ticket_protocol(headers.get("sec-websocket-protocol"))
+        if ticket is not None:
+            if not self._consume_ticket(ticket):
+                return 401, {"error": "unauthorized"}
+        elif not self._access.allows(headers.get("authorization")):
             return 401, {"error": "unauthorized"}
         if headers.get("upgrade", "").lower() != "websocket":
             return 400, {"error": "expected a websocket upgrade"}
@@ -399,6 +493,19 @@ class WorkbenchServer:
 
 def _error_frame(message: str) -> str:
     return json.dumps({"type": "error", "message": message})
+
+
+def _ticket_protocol(header: str | None) -> str | None:
+    """Return the offered ticket subprotocol, if the client supplied one."""
+    if not header:
+        return None
+    for candidate in header.split(","):
+        token = candidate.strip()
+        if token.startswith(_TICKET_PROTOCOL_PREFIX) and len(token) > len(
+            _TICKET_PROTOCOL_PREFIX
+        ):
+            return token
+    return None
 
 
 def _conversation_from(path: str) -> str | None:

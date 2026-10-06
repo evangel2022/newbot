@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from newbot.domain.message import Message, Role
-from newbot.domain.session import CheckpointRecord, SessionKey
+from newbot.domain.session import CheckpointRecord, MessageRecord, SessionKey
 from newbot.session.manager import SessionManager
 from support import FakeSummarizer, MemorySessionStore
 
@@ -22,9 +22,11 @@ async def test_compaction_replays_a_summary_plus_recent_messages_verbatim() -> N
     assert changed == "earlier turns"
     assert summarizer.inputs == [messages[:4]]
     records = store.records[("ws", "test", "c1")]
-    assert isinstance(records[0], CheckpointRecord)
-    assert records[0].summary == "earlier turns"
-    assert [record.message for record in records[1:]] == list(messages[4:])
+    checkpoints = [record for record in records if isinstance(record, CheckpointRecord)]
+    assert [checkpoint.summary for checkpoint in checkpoints] == ["earlier turns"]
+    saved = [record.message for record in records if isinstance(record, MessageRecord)]
+    assert saved == list(messages)
+    assert len(records) == len(messages) + 1
     assert await manager.history(KEY) == (
         Message(role=Role.SYSTEM, content="earlier turns"),
         *messages[4:],

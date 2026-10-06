@@ -136,3 +136,100 @@ async def test_extra_write_root_is_writable_but_not_readable(tmp_path: Path) -> 
     assert write.is_error is False
     assert (extra / "new.txt").read_text(encoding="utf-8") == "x"
     assert read.is_error is True
+
+
+async def test_edit_file_replaces_a_unique_string(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("hello world\n", encoding="utf-8")
+    registry = _registry(WorkspaceGuard(tmp_path))
+
+    result = await registry.invoke(
+        _call("edit_file", path="note.txt", old_string="world", new_string="there"),
+        _ctx(),
+    )
+
+    assert result.is_error is False
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "hello there\n"
+
+
+async def test_edit_file_deletes_text_with_an_empty_replacement(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("keep\ndrop\nkeep\n", encoding="utf-8")
+    registry = _registry(WorkspaceGuard(tmp_path))
+
+    result = await registry.invoke(
+        _call("edit_file", path="note.txt", old_string="drop\n", new_string=""),
+        _ctx(),
+    )
+
+    assert result.is_error is False
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "keep\nkeep\n"
+
+
+async def test_edit_file_rejects_a_missing_string(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+    registry = _registry(WorkspaceGuard(tmp_path))
+
+    result = await registry.invoke(
+        _call("edit_file", path="note.txt", old_string="absent", new_string="x"),
+        _ctx(),
+    )
+
+    assert result.is_error is True
+    assert "not found" in result.content
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "hello"
+
+
+async def test_edit_file_rejects_an_ambiguous_string(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("a\na\n", encoding="utf-8")
+    registry = _registry(WorkspaceGuard(tmp_path))
+
+    result = await registry.invoke(
+        _call("edit_file", path="note.txt", old_string="a", new_string="b"),
+        _ctx(),
+    )
+
+    assert result.is_error is True
+    assert "2 times" in result.content
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "a\na\n"
+
+
+async def test_edit_file_preserves_crlf_line_endings(tmp_path: Path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_bytes(b"one\r\ntwo\r\n")
+    registry = _registry(WorkspaceGuard(tmp_path))
+
+    result = await registry.invoke(
+        _call("edit_file", path="note.txt", old_string="two", new_string="three"),
+        _ctx(),
+    )
+
+    assert result.is_error is False
+    assert target.read_bytes() == b"one\r\nthree\r\n"
+
+
+async def test_edit_file_outside_workspace_is_denied(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    registry = _registry(WorkspaceGuard(root))
+
+    result = await registry.invoke(
+        _call("edit_file", path=str(outside), old_string="secret", new_string="x"),
+        _ctx(),
+    )
+
+    assert result.is_error is True
+    assert outside.read_text(encoding="utf-8") == "secret"
+
+
+async def test_edit_file_rejects_a_non_utf8_file(tmp_path: Path) -> None:
+    (tmp_path / "blob.bin").write_bytes(b"\xff\xfe\x00bad")
+    registry = _registry(WorkspaceGuard(tmp_path))
+
+    result = await registry.invoke(
+        _call("edit_file", path="blob.bin", old_string="bad", new_string="good"),
+        _ctx(),
+    )
+
+    assert result.is_error is True
+    assert "UTF-8" in result.content

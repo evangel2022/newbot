@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -11,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from newbot.cli.entry import main
+from newbot.config.schema import ProviderSettings
 from newbot.domain.message import Message, Role
 from newbot.domain.tool import ToolCall
+from newbot.ports.provider import ProviderPort
 from support import FakeProvider, ScriptedProvider, reply_events
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -28,7 +31,9 @@ model = "gpt-test"
 """
 
 
-def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    *args: str, stdin: str | None = None
+) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(SRC)
     return subprocess.run(
@@ -37,6 +42,7 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        input=stdin,
         env=env,
     )
 
@@ -409,3 +415,111 @@ def test_cli_memory_revert_set_rejects_an_unknown_change_set(
 
     assert result.returncode == 1
     assert "unknown change-set" in result.stderr
+
+
+def _write_trigger_config(tmp_path: Path) -> Path:
+    path = _write_config(tmp_path)
+    triggers = (tmp_path / "triggers").as_posix()
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + f'\n[triggers]\ndir = "{triggers}"\n'
+        + '\n[[triggers.items]]\nid = "ci"\nconversation = "ops"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_cli_trigger_queues_a_delivery(tmp_path: Path) -> None:
+    config = _write_trigger_config(tmp_path)
+
+    result = _run_cli("trigger", "ci", "build failed", "--config", str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("queued ")
+    files = list((tmp_path / "triggers").glob("*.json"))
+    assert len(files) == 1
+    record = json.loads(files[0].read_text(encoding="utf-8"))
+    assert record["trigger_id"] == "ci"
+    assert record["conversation"] == "ops"
+    assert record["text"] == "build failed"
+
+
+def test_cli_trigger_reads_stdin_when_the_message_is_omitted(tmp_path: Path) -> None:
+    config = _write_trigger_config(tmp_path)
+
+    result = _run_cli("trigger", "ci", "--config", str(config), stdin="piped report")
+
+    assert result.returncode == 0, result.stderr
+    files = list((tmp_path / "triggers").glob("*.json"))
+    assert json.loads(files[0].read_text(encoding="utf-8"))["text"] == "piped report"
+
+
+def test_cli_trigger_rejects_an_unknown_id(tmp_path: Path) -> None:
+    config = _write_trigger_config(tmp_path)
+
+    result = _run_cli("trigger", "nope", "hi", "--config", str(config))
+
+    assert result.returncode == 2
+    assert "unknown trigger" in result.stderr
+
+
+def _forbid_provider(settings: ProviderSettings) -> ProviderPort:
+    raise AssertionError(f"status must not build a provider for {settings.name}")
+
+
+def test_cli_status_reports_config_without_a_model_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+
+    code = main(["status", "--config", str(config)], provider_factory=_forbid_provider)
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert f"config: {config.resolve()}" in captured.out
+    assert "workspace:" in captured.out
+    assert "provider key: set" in captured.out
+    assert "model: gpt-test" in captured.out
+
+
+def test_cli_status_missing_config_exits_two(tmp_path: Path) -> None:
+    result = _run_cli("status", "--config", str(tmp_path / "nope.toml"))
+
+    assert result.returncode == 2
+    assert "error:" in result.stderr
+
+
+def test_cli_interactive_stop_reports_no_running_tasks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    provider = FakeProvider(reply_events("unused"))
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: provider,
+        stdin=io.StringIO("/stop\n/exit\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "no running subagent tasks" in captured.out
+    assert provider.requests == []
+
+
+def test_cli_interactive_new_starts_a_fresh_conversation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = _write_config(tmp_path)
+    provider = FakeProvider(reply_events("unused"))
+
+    code = main(
+        ["--config", str(config)],
+        provider_factory=lambda _settings: provider,
+        stdin=io.StringIO("/new\n/exit\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "started a new conversation" in captured.out
+    assert provider.requests == []

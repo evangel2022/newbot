@@ -2,8 +2,7 @@
 
 Existing suites already protect several contracts (the matrix cites them by name).
 This module adds only the contracts that were not covered at a public boundary,
-plus ``xfail`` tests for the two known defects (A1, A2) so the divergence stays
-visible and is removed when fixed.
+including regression tests for the two defects (A1, A2) fixed in this pass.
 """
 
 from __future__ import annotations
@@ -52,8 +51,8 @@ def _settings(
     return Settings.model_validate(payload)
 
 
-def _runtime(settings: Settings, provider: ProviderPort) -> Runtime:
-    return build_runtime(
+async def _runtime(settings: Settings, provider: ProviderPort) -> Runtime:
+    return await build_runtime(
         settings,
         provider_factory=lambda _settings: provider,
         stdout=io.StringIO(),
@@ -103,7 +102,7 @@ async def test_a_failed_turn_is_reported_as_a_result_not_an_exception(
 ) -> None:
     """Agent loop: a deliberate failure becomes TurnFailed and a non-zero exit."""
     stderr = io.StringIO()
-    runtime = build_runtime(
+    runtime = await build_runtime(
         _settings(tmp_path),
         provider_factory=lambda _settings: FailingProvider(),
         stdout=io.StringIO(),
@@ -151,7 +150,7 @@ async def test_path_escape_denial_is_a_bounded_tool_result(tmp_path: Path) -> No
             Message(role=Role.ASSISTANT, content="I could not read it"),
         ]
     )
-    runtime = build_runtime(
+    runtime = await build_runtime(
         _settings(tmp_path),
         provider_factory=lambda _settings: provider,
         stdout=io.StringIO(),
@@ -174,7 +173,7 @@ async def test_path_escape_denial_is_a_bounded_tool_result(tmp_path: Path) -> No
 
 async def test_sessions_are_isolated_per_transport(tmp_path: Path) -> None:
     """Session: the key is transport + conversation; no unified session by default."""
-    runtime = _runtime(_settings(tmp_path), FakeProvider(reply_events("pong")))
+    runtime = await _runtime(_settings(tmp_path), FakeProvider(reply_events("pong")))
 
     await runtime.hub.submit(
         InboundEnvelope(transport="cli", conversation_id="c", text="cli-only")
@@ -191,7 +190,9 @@ async def test_session_files_live_outside_the_workspace(
 ) -> None:
     """Session/Security: history is stored outside the agent-accessible workspace."""
     monkeypatch.setenv("NEWBOT_CONFIG_DIR", str(tmp_path / "cfg"))
-    runtime = _runtime(_settings(tmp_path, sessions=False), FakeProvider(reply_events("pong")))
+    runtime = await _runtime(
+        _settings(tmp_path, sessions=False), FakeProvider(reply_events("pong"))
+    )
 
     await runtime.hub.submit(
         InboundEnvelope(transport="cli", conversation_id="c", text="hi")
@@ -216,7 +217,6 @@ def test_memory_layout_is_confined_to_the_workspace(tmp_path: Path) -> None:
 # --- Configuration ---------------------------------------------------------
 
 
-@pytest.mark.xfail(reason="A2: only whole-value ${VAR} references expand", strict=False)
 def test_env_reference_inside_a_larger_string_is_expanded(tmp_path: Path) -> None:
     """Configuration: any string value may embed ${VAR} (nanobot configuration.md)."""
     path = tmp_path / "config.toml"
@@ -234,10 +234,8 @@ def test_env_reference_inside_a_larger_string_is_expanded(tmp_path: Path) -> Non
     assert settings.provider.api_key == "Bearer s3cret"
 
 
-# --- Session (known defect) ------------------------------------------------
+# --- Session (compaction regression) ---------------------------------------
 
-
-@pytest.mark.xfail(reason="A1: compaction rewrites the session and drops history", strict=False)
 async def test_compaction_keeps_saved_history_on_disk(tmp_path: Path) -> None:
     """Session: /compact bounds context without destroying saved history (ADR-005)."""
     manager = build_sessions(_settings(tmp_path))

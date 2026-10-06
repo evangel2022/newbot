@@ -22,7 +22,9 @@ from newbot.app.lifecycle import (
     run_memory_revert_set,
     run_once,
     run_serve,
+    run_trigger,
 )
+from newbot.app.status import render_status
 from newbot.config.init import InitOutcome, initialize
 from newbot.config.loader import load_settings
 from newbot.config.paths import config_path
@@ -40,6 +42,12 @@ def _non_negative(value: str) -> int:
     if number < 0:
         raise argparse.ArgumentTypeError("must be zero or greater")
     return number
+
+
+def _trigger_message(args: argparse.Namespace, stdin: TextIO | None) -> str:
+    if args.message is not None:
+        return str(args.message)
+    return (sys.stdin if stdin is None else stdin).read()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -63,6 +71,12 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--workspace", type=Path, default=None, help="agent workspace directory"
     )
+    status = subparsers.add_parser(
+        "status", help="show resolved configuration without calling the model"
+    )
+    status.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
     compact = subparsers.add_parser(
         "compact", help="summarize a session's older history"
     )
@@ -85,6 +99,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "serve", help="run scheduled maintenance until stopped"
     )
     serve.add_argument(
+        "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
+    )
+    trigger = subparsers.add_parser(
+        "trigger", help="queue a local trigger delivery for the host"
+    )
+    trigger.add_argument("trigger_id", help="the configured trigger id")
+    trigger.add_argument(
+        "message", nargs="?", help="the message text; reads stdin when omitted"
+    )
+    trigger.add_argument(
         "--config", type=Path, default=argparse.SUPPRESS, help=_CONFIG_HELP
     )
     memory = subparsers.add_parser(
@@ -134,6 +158,8 @@ def main(
     except ConfigLoadError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if args.command == "status":
+        return _status_command(args, settings)
     try:
         if args.command == "run":
             return asyncio.run(
@@ -151,6 +177,10 @@ def main(
             return asyncio.run(run_curate(settings, provider_factory=provider_factory))
         if args.command == "serve":
             return asyncio.run(run_serve(settings, provider_factory=provider_factory))
+        if args.command == "trigger":
+            return asyncio.run(
+                run_trigger(settings, args.trigger_id, _trigger_message(args, stdin))
+            )
         if args.command == "memory":
             return _memory_command(args, settings)
         return asyncio.run(
@@ -180,6 +210,12 @@ def _init_command(args: argparse.Namespace) -> int:
         return 0
     print(f"created config: {config_file}")
     print(f"created workspace: {workspace}")
+    return 0
+
+
+def _status_command(args: argparse.Namespace, settings: Settings) -> int:
+    config_file = (args.config if args.config is not None else config_path()).resolve()
+    print(render_status(settings, config_path=config_file), end="")
     return 0
 
 

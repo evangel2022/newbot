@@ -269,8 +269,9 @@ Rules:
 | --- | --- |
 | `newbot run -m "..."` | One-shot turn; prints the reply; exits. |
 | `newbot` (no args) | Interactive terminal session with persistent history. |
-| `newbot serve` | Long-running host: scheduler + curator + loopback workbench transport (HTTP health/capabilities, authed `POST /messages`, and a `stream` capability over WebSocket; `server.port`, `server.token`; ADR-010, ADR-011). |
+| `newbot serve` | Long-running host: scheduler + curator + config-declared recurring turns + a durable local-trigger queue consumed into bound sessions + a config-declared heartbeat that runs `HEARTBEAT.md` active tasks quietly in its own conversation + agent-created scheduled jobs dispatched from `<workspace>/cron/jobs.json` + a Telegram chat channel that long-polls messages into per-chat sessions and replies in-chat + loopback workbench transport (HTTP health/capabilities, authed `POST /messages`, a `stream` capability over WebSocket, short-lived browser `ticket`s, and a bundled local client at `GET /` / `GET /assets/*`; `server.port`, `server.token`, `schedule.turns`, `triggers.items`, `heartbeat.enabled`, `channels.telegram.enabled`; `newbot trigger`; ADR-010, ADR-011, ADR-013, ADR-014, ADR-016, ADR-018, ADR-019, ADR-020, ADR-021). |
 | `newbot init` | Create config/workspace defaults (never recovers from an invalid file). |
+| `newbot status` | Print resolved config, workspace, provider/model, and tool policy without constructing a provider or calling the model. |
 
 ### 6.2 Turn lifecycle
 
@@ -289,11 +290,14 @@ Rules:
 
 - **Per-session serialization.** A session processes one turn at a time; new inbound work is
   queued, not injected into an active turn.
-- **Cross-session parallelism** is allowed but bounded by a global worker limit.
+- **Cross-session parallelism** is allowed but bounded by a global worker limit when
+  `agent.maxConcurrentTurns` is set; unset, it is unlimited (ADR-015).
 - **Event fan-out.** `EventHub.publish` awaits local subscribers for state changes;
   `EventHub.emit` queues routed outbound delivery without awaiting network I/O.
 - **Delivery semantics.** Outbound channel delivery is at-least-once; consumers must tolerate
-  duplicates. A turn that reaches the agent but fails is marked failed, not retried forever.
+  duplicates. A turn that reaches the agent but fails is marked failed, not retried forever. A
+  deliberate failure from transport delivery is itself terminal: the engine marks the turn failed
+  and does not retry the delivery; the reply stays in the session (ADR-017).
 - **Durability.** Session writes are atomic (temp + replace). Crash durability (fsync) is
   requested only on paths that require it (explicit flush, durable shutdown); ordinary appends
   trade durability for latency, deliberately and in one place.
@@ -324,11 +328,11 @@ Rules:
   guards, event sink, cancellation token, and the owning session id. Tools receive only what
   they need; they never reach into global state.
 - **Registry.** Tools are discovered from built-in modules and explicit entry points, then
-  filtered by the agent's allowlist. Discovery is deterministic and traceable; there are no
+  filtered by the agent's allowlist (ADR-026). Discovery is deterministic and traceable; there are no
   import-time side effects that silently enable a tool.
 - **Built-in groups.** filesystem (`read`, `write`, `edit`, `list`, patch), shell, web
-  (fetch/search), MCP (external servers), schedule (timers/heartbeat/triggers), delegate
-  (subagents), and self-inspection (runtime state).
+  (fetch/search; ADR-030), MCP (stdio and HTTP servers; ADR-022, ADR-024), schedule (timers/heartbeat/triggers/`cron`), skills (`skill`; ADR-023), delegate
+  (subagents; ADR-029), and self-inspection (runtime state).
 - **Result discipline.** Tool results are bounded in size, sanitized of local paths and
   internal markers, and normalized into `ToolResult` before entering model context.
 - **Policy injection.** Filesystem, shell, and web tools call `policy` guards on every path;
@@ -447,6 +451,12 @@ Rules: prefer the existing registry/discovery patterns over ad hoc wiring (A3); 
 that is "know-how" rather than code belongs in a skill, not in the agent loop (A1); plugin/MCP
 lifecycle is owned by the composition root, which connects before use and closes on shutdown —
 the core never manages connection lifecycle.
+
+An Agent Plugin (v1) is a directory `<workspace>/plugins/<name>/` with a `plugin.json`
+manifest; `[plugins].enabled` activates it by name, and its bundled skills merge under the
+workspace's own, with workspace > plugin precedence (ADR-027). A bundled `mcp.json` adds
+MCP servers whose stdio processes receive contained `PLUGIN_ROOT`/`PLUGIN_DATA`; explicit
+`[tools.mcp.servers]` entries win name collisions (ADR-028).
 
 ## 14. Testing Strategy
 
@@ -691,10 +701,10 @@ Format: **Responsibility / Input / Output / State / Depends on / Forbidden.**
 ### 16.11 `tools`
 
 - **Responsibility:** Tool contract + registry + built-in tools (filesystem, shell, web, MCP,
-  schedule, delegation, self-inspection).
+  schedule/`cron`, delegation, self-inspection).
 - **Input:** `ToolCall` + `ToolContext`.
 - **Output:** Normalized `ToolResult`; events.
-- **State:** Registry contents (defined at composition); MCP client handles owned by `app`.
+- **State:** Registry contents (defined at composition); MCP client handles (`adapters/mcp`) owned by `app`.
 - **Depends on:** `domain`, `ports`, `policy`.
 - **Forbidden:** `core` internals, transport/provider classes, raw chains of control over the
   turn.
@@ -720,7 +730,8 @@ Format: **Responsibility / Input / Output / State / Depends on / Forbidden.**
 ### 16.14 `adapters/transports`
 
 - **Responsibility:** Translate platform I/O to/from envelopes; enforce transport access
-  control; own wire protocol and local client assets.
+  control; own wire protocol and local client assets; bound inbound payloads at the wire
+  boundary.
 - **Input:** Platform events, `OutboundEnvelope`.
 - **Output:** `InboundEnvelope`, platform sends, wire events.
 - **State:** Connection/session maps, auth state, capability negotiation.
@@ -730,7 +741,7 @@ Format: **Responsibility / Input / Output / State / Depends on / Forbidden.**
 
 ### 16.15 `adapters/stores`
 
-- **Responsibility:** Concrete persistence: JSONL sessions, file memory/journal, FS-backed
+- **Responsibility:** Concrete persistence: JSONL sessions, file memory/journal, JSON job registry, FS-backed
   version vault.
 - **Input:** Records/contents to persist; load requests.
 - **Output:** Loaded normalized records/contents; atomic write results.
@@ -740,7 +751,7 @@ Format: **Responsibility / Input / Output / State / Depends on / Forbidden.**
 
 ### 16.16 `extensions`
 
-- **Responsibility:** Discover/load skills and plugins; validate manifests; surface MCP server
+- **Responsibility:** Discover/load workspace skills (markdown + YAML frontmatter), plugins, and entry-point tools; validate manifests; surface MCP server
   definitions.
 - **Input:** Workspace/config extension locations, plugin manifests.
 - **Output:** Loaded skills and activation records.

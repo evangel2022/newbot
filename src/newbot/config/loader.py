@@ -14,7 +14,8 @@ from newbot.config.paths import config_path
 from newbot.config.schema import Settings
 from newbot.domain.errors import ConfigLoadError
 
-_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV_REFERENCE = re.compile(r"\$\{([^}]*)\}")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MAX_REPORTED_ERRORS = 5
 
 
@@ -50,17 +51,7 @@ def load_settings(
 
 def _expand_env_refs(value: object, env: Mapping[str, str], *, location: str) -> object:
     if isinstance(value, str):
-        match = _ENV_REF.fullmatch(value)
-        if match is None:
-            return value
-        name = match.group(1)
-        resolved = env.get(name)
-        if resolved is None:
-            raise ConfigLoadError(
-                f"environment variable {name!r} is not set",
-                location=location or "<root>",
-            )
-        return resolved
+        return _expand_env_string(value, env, location=location)
     if isinstance(value, dict):
         return {
             str(key): _expand_env_refs(
@@ -74,6 +65,29 @@ def _expand_env_refs(value: object, env: Mapping[str, str], *, location: str) ->
             for index, child in enumerate(value)
         ]
     return value
+
+
+def _expand_env_string(value: str, env: Mapping[str, str], *, location: str) -> str:
+    """Replace every ``${VAR}`` reference, failing fast when one is unresolved."""
+    if "${" not in value:
+        return value
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if _ENV_NAME.fullmatch(name) is None:
+            raise ConfigLoadError(
+                f"invalid environment reference {match.group(0)!r}",
+                location=location or "<root>",
+            )
+        resolved = env.get(name)
+        if resolved is None:
+            raise ConfigLoadError(
+                f"environment variable {name!r} is not set",
+                location=location or "<root>",
+            )
+        return resolved
+
+    return _ENV_REFERENCE.sub(replace, value)
 
 
 def _format_validation_error(exc: ValidationError) -> str:

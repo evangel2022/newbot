@@ -42,6 +42,23 @@ _LIST_SCHEMA: Mapping[str, object] = {
     "additionalProperties": False,
 }
 
+_EDIT_SCHEMA: Mapping[str, object] = {
+    "type": "object",
+    "properties": {
+        "path": _PATH_PROPERTY,
+        "old_string": {
+            "type": "string",
+            "description": "Exact text to replace; it must appear exactly once.",
+        },
+        "new_string": {
+            "type": "string",
+            "description": "Replacement text; may be empty to delete the old text.",
+        },
+    },
+    "required": ["path", "old_string", "new_string"],
+    "additionalProperties": False,
+}
+
 
 class ReadFileTool:
     """Reads a UTF-8 text file inside the workspace."""
@@ -99,6 +116,60 @@ class WriteFileTool:
         except OSError as exc:
             raise ToolError(f"cannot write {self._guard.display(path)}: {exc}") from exc
         return ToolOutput(text=f"wrote {len(content)} chars to {self._guard.display(path)}")
+
+
+class EditFileTool:
+    """Replaces one exact, unique string in a workspace text file."""
+
+    def __init__(self, guard: WorkspaceGuard) -> None:
+        self._guard = guard
+        self.spec = ToolSpec(
+            name="edit_file",
+            description=(
+                "Replace one exact string in a workspace text file. The old text "
+                "must appear exactly once; add surrounding lines to make it unique."
+            ),
+            parameters=_EDIT_SCHEMA,
+        )
+
+    async def invoke(
+        self, arguments: Mapping[str, object], ctx: ToolContext
+    ) -> ToolOutput:
+        path = self._guard.resolve(require_string(arguments, "path"), Capability.WRITE)
+        old = require_string(arguments, "old_string")
+        new = arguments.get("new_string")
+        if not isinstance(new, str):
+            raise ToolError("argument 'new_string' must be a string")
+        if old == new:
+            raise ToolError("'old_string' and 'new_string' are identical")
+        if not path.is_file():
+            raise ToolError(f"not a file: {self._guard.display(path)}")
+        display = self._guard.display(path)
+
+        def _edit() -> None:
+            raw = path.read_bytes().decode("utf-8")
+            logical = raw.replace("\r\n", "\n").replace("\r", "\n")
+            count = logical.count(old)
+            if count == 0:
+                raise ToolError(f"{old!r} not found in {display}")
+            if count > 1:
+                raise ToolError(
+                    f"{old!r} appears {count} times in {display}; "
+                    "include more context to make it unique"
+                )
+            ending = "\r\n" if "\r\n" in raw else "\n"
+            updated = logical.replace(old, new, 1)
+            if ending != "\n":
+                updated = updated.replace("\n", ending)
+            path.write_bytes(updated.encode("utf-8"))
+
+        try:
+            await asyncio.to_thread(_edit)
+        except UnicodeDecodeError as exc:
+            raise ToolError(f"cannot edit {display}: not a UTF-8 text file") from exc
+        except OSError as exc:
+            raise ToolError(f"cannot edit {display}: {exc}") from exc
+        return ToolOutput(text=f"edited {display}")
 
 
 class ListDirTool:

@@ -42,6 +42,10 @@ class SessionServicePort(Protocol):
         """Persist messages as part of a completed turn."""
         ...
 
+    async def reset(self, key: SessionKey) -> None:
+        """Discard the session's recorded history, starting it over."""
+        ...
+
 
 class SummarizerPort(Protocol):
     """Condenses a run of messages into a checkpoint summary."""

@@ -11,6 +11,7 @@ class TurnStatus(StrEnum):
 
     COMPLETED = "completed"
     BUDGET_EXCEEDED = "budget_exceeded"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)

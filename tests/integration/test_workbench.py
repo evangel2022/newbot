@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import io
 import json
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from newbot.adapters.transports.websocket import MAX_MESSAGE_BYTES
 from newbot.app.lifecycle import run_serve
 from newbot.config.schema import Settings
 from newbot.domain.message import Message, Role
@@ -93,7 +95,10 @@ async def test_workbench_negotiates_capabilities_and_answers_a_turn(
 
     assert health.status_code == 200
     assert capabilities.status_code == 200
-    assert capabilities.json() == {"protocol": 1, "capabilities": ["chat", "stream"]}
+    assert capabilities.json() == {
+        "protocol": 1,
+        "capabilities": ["chat", "stream", "ticket"],
+    }
     assert unauthorized.status_code == 401
     assert reply.status_code == 200
     assert reply.json() == {"reply": "pong"}
@@ -116,6 +121,27 @@ async def test_workbench_rejects_an_incompatible_protocol(tmp_path: Path) -> Non
         await task
 
     assert response.status_code == 400
+
+
+async def test_workbench_rejects_an_oversized_request_body(tmp_path: Path) -> None:
+    stdout = io.StringIO()
+    provider = FakeProvider(reply_events("pong"))
+    task = _serve(_settings(tmp_path, token=_TOKEN), stdout, provider)
+    try:
+        url = await _wait_for_url(stdout)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{url}/messages",
+                content=b"x" * (MAX_MESSAGE_BYTES + 1),
+                headers={"Authorization": f"Bearer {_TOKEN}"},
+            )
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert response.status_code == 413
+    assert provider.requests == []
 
 
 async def test_workbench_refuses_mutations_without_a_token(tmp_path: Path) -> None:
@@ -213,6 +239,134 @@ async def test_workbench_refuses_a_stream_without_a_token(tmp_path: Path) -> Non
         task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_workbench_issues_a_ticket_for_browser_streaming(tmp_path: Path) -> None:
+    websockets = pytest.importorskip("websockets")
+    stdout = io.StringIO()
+    task = _serve(_settings(tmp_path, token=_TOKEN), stdout)
+    frames: list[dict[str, object]] = []
+    try:
+        url = await _wait_for_url(stdout)
+        async with httpx.AsyncClient() as client:
+            issued = await client.post(
+                f"{url}/ticket", headers={"Authorization": f"Bearer {_TOKEN}"}
+            )
+        assert issued.status_code == 200
+        protocol = f"newbot.ticket.{issued.json()['ticket']}"
+        uri = url.replace("http://", "ws://", 1) + "/stream?conversation=shared"
+        async with websockets.connect(
+            uri, subprotocols=[protocol], proxy=None
+        ) as socket:
+            assert socket.subprotocol == protocol
+            await socket.send(json.dumps({"text": "hi", "protocol": 1}))
+            async for message in socket:
+                frame = json.loads(message)
+                frames.append(frame)
+                if frame["type"] in {"done", "error"}:
+                    break
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert frames == [
+        {"type": "started"},
+        {"type": "delta", "text": "pong"},
+        {"type": "done", "status": "completed"},
+    ]
+
+
+async def test_workbench_ticket_is_single_use(tmp_path: Path) -> None:
+    websockets = pytest.importorskip("websockets")
+    invalid_status = pytest.importorskip("websockets.exceptions").InvalidStatus
+    stdout = io.StringIO()
+    task = _serve(_settings(tmp_path, token=_TOKEN), stdout)
+    try:
+        url = await _wait_for_url(stdout)
+        async with httpx.AsyncClient() as client:
+            issued = await client.post(
+                f"{url}/ticket", headers={"Authorization": f"Bearer {_TOKEN}"}
+            )
+        protocol = f"newbot.ticket.{issued.json()['ticket']}"
+        uri = url.replace("http://", "ws://", 1) + "/stream"
+        async with websockets.connect(uri, subprotocols=[protocol], proxy=None):
+            pass
+        with pytest.raises(invalid_status):
+            async with websockets.connect(uri, subprotocols=[protocol], proxy=None):
+                pass
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_workbench_requires_a_token_to_issue_a_ticket(tmp_path: Path) -> None:
+    stdout = io.StringIO()
+    task = _serve(_settings(tmp_path, token=_TOKEN), stdout)
+    try:
+        url = await _wait_for_url(stdout)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{url}/ticket")
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert response.status_code == 401
+
+
+async def test_workbench_serves_its_local_client_assets(tmp_path: Path) -> None:
+    stdout = io.StringIO()
+    task = _serve(_settings(tmp_path, token=_TOKEN), stdout)
+    try:
+        url = await _wait_for_url(stdout)
+        async with httpx.AsyncClient() as client:
+            index = await client.get(f"{url}/")
+            script = await client.get(f"{url}/assets/app.js")
+            stylesheet = await client.get(f"{url}/assets/style.css")
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert index.status_code == 200
+    assert index.headers["content-type"] == "text/html; charset=utf-8"
+    assert "newbot workbench" in index.text
+    assert script.status_code == 200
+    assert script.headers["content-type"] == "text/javascript; charset=utf-8"
+    assert stylesheet.status_code == 200
+    assert stylesheet.headers["content-type"] == "text/css; charset=utf-8"
+
+
+async def test_workbench_serves_no_asset_outside_its_bundle(tmp_path: Path) -> None:
+    stdout = io.StringIO()
+    task = _serve(_settings(tmp_path, token=_TOKEN), stdout)
+    try:
+        url = await _wait_for_url(stdout)
+        port = int(url.rsplit(":", 1)[1])
+        parent = await asyncio.to_thread(_raw_status, port, "/assets/../websocket.py")
+        encoded = await asyncio.to_thread(
+            _raw_status, port, "/assets/%2e%2e%2fwebsocket.py"
+        )
+        missing = await asyncio.to_thread(_raw_status, port, "/assets/missing.js")
+    finally:
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert parent == 404
+    assert encoded == 404
+    assert missing == 404
+
+
+def _raw_status(port: int, path: str) -> int:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", path)
+        return connection.getresponse().status
+    finally:
+        connection.close()
 
 
 async def _wait_for_url(stdout: io.StringIO, *, timeout: float = 5.0) -> str:

@@ -61,3 +61,14 @@ async def test_history_never_starts_with_an_orphan_tool_message() -> None:
     history = await manager.history(KEY)
 
     assert history == (Message(role=Role.ASSISTANT, content="done"),)
+
+
+async def test_reset_clears_the_recorded_history() -> None:
+    store = MemorySessionStore()
+    manager = SessionManager(store, workspace_id="ws", history_limit=10)
+    await manager.record(KEY, (Message(role=Role.USER, content="hi"),))
+
+    await manager.reset(KEY)
+
+    assert await manager.history(KEY) == ()
+    assert store.records[("ws", "test", "c1")] == []

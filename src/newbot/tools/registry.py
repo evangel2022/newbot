@@ -6,16 +6,29 @@ import json
 from collections.abc import Collection, Mapping, Sequence
 
 from newbot.domain.errors import NewbotError, ToolError
+from newbot.domain.skill import Skill
 from newbot.domain.tool import ToolCall, ToolResult, ToolSpec
 from newbot.policy.network import NetworkGuard
 from newbot.policy.redaction import Redactor, bound_text
 from newbot.policy.sandbox import Sandbox
 from newbot.policy.shell import ShellGuard
 from newbot.policy.workspace import WorkspaceGuard
+from newbot.ports.jobs import JobStorePort
+from newbot.ports.subagents import SubagentPort
 from newbot.ports.tools import ToolContext
 from newbot.tools.base import Tool
-from newbot.tools.filesystem import ListDirTool, ReadFileTool, WriteFileTool
+from newbot.tools.cron import CronTool
+from newbot.tools.delegate import DelegateTool
+from newbot.tools.filesystem import (
+    EditFileTool,
+    ListDirTool,
+    ReadFileTool,
+    WriteFileTool,
+)
+from newbot.tools.patch import ApplyPatchTool
+from newbot.tools.self import MyTool
 from newbot.tools.shell import DEFAULT_TIMEOUT_SECONDS, ShellTool
+from newbot.tools.skills import SkillTool
 from newbot.tools.web import WebFetchTool
 
 
@@ -67,23 +80,46 @@ def build_default_registry(
     *,
     network_guard: NetworkGuard,
     sandbox: Sandbox | None = None,
+    enable_web: bool = True,
     allowlist: Collection[str] | None = None,
     shell_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     redactor: Redactor | None = None,
+    jobs: JobStorePort | None = None,
+    mcp_tools: Sequence[Tool] = (),
+    web_search: Tool | None = None,
+    discovered_tools: Sequence[Tool] = (),
+    skills: Sequence[Skill] = (),
+    self_state: Mapping[str, object] | None = None,
+    subagents: SubagentPort | None = None,
 ) -> ToolRegistry:
     """Construct the built-in tool set, filtered by the agent allowlist."""
     workspace_only = WorkspaceGuard(guard.root)
     tools: list[Tool] = [
         ReadFileTool(guard),
         WriteFileTool(guard),
+        EditFileTool(guard),
         ListDirTool(guard),
+        ApplyPatchTool(guard),
         ShellTool(
             ShellGuard(workspace_only),
             sandbox=sandbox,
             timeout_seconds=shell_timeout_seconds,
         ),
-        WebFetchTool(network_guard),
     ]
+    if enable_web:
+        tools.append(WebFetchTool(network_guard))
+        if web_search is not None:
+            tools.append(web_search)
+    if jobs is not None:
+        tools.append(CronTool(jobs))
+    tools.extend(mcp_tools)
+    tools.extend(discovered_tools)
+    if skills:
+        tools.append(SkillTool(skills))
+    if self_state is not None:
+        tools.append(MyTool(self_state))
+    if subagents is not None:
+        tools.append(DelegateTool(subagents))
     return ToolRegistry(tools, allowlist=allowlist, redactor=redactor)
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from newbot.core.context import ContextAssembler
@@ -14,6 +15,7 @@ from newbot.domain.errors import NewbotError
 from newbot.domain.events import TurnCompleted, TurnFailed, TurnStarted
 from newbot.domain.message import Message, Role
 from newbot.domain.session import SessionKey
+from newbot.domain.turn import TurnStatus
 from newbot.ports.sessions import SessionServicePort
 from newbot.ports.tools import ToolContext
 
@@ -30,6 +32,7 @@ class TurnEngine:
         agent: AgentDefinition,
         workspace_root: Path,
         sessions: SessionServicePort,
+        max_concurrent_turns: int | None = None,
     ) -> None:
         self._hub = hub
         self._reasoning = reasoning
@@ -38,9 +41,12 @@ class TurnEngine:
         self._workspace_root = workspace_root
         self._sessions = sessions
         self._locks: dict[SessionKey, asyncio.Lock] = {}
+        self._turns = (
+            None if max_concurrent_turns is None else asyncio.Semaphore(max_concurrent_turns)
+        )
 
-    async def handle(self, envelope: InboundEnvelope) -> None:
-        """Serialize and run the turn for the envelope's session."""
+    async def handle(self, envelope: InboundEnvelope) -> TurnStatus:
+        """Serialize the turn per session and run it within the global bound."""
         session = SessionKey(
             transport=envelope.transport, conversation=envelope.conversation_id
         )
@@ -48,10 +54,15 @@ class TurnEngine:
         if lock is None:
             lock = asyncio.Lock()
             self._locks[session] = lock
-        async with lock:
-            await self._run_turn(session, envelope)
+        async with lock, AsyncExitStack() as stack:
+            turns = self._turns
+            if turns is not None:
+                await stack.enter_async_context(turns)
+            return await self._run_turn(session, envelope)
 
-    async def _run_turn(self, session: SessionKey, envelope: InboundEnvelope) -> None:
+    async def _run_turn(
+        self, session: SessionKey, envelope: InboundEnvelope
+    ) -> TurnStatus:
         await self._hub.publish(TurnStarted(session=session))
         user_message = Message(role=Role.USER, content=envelope.text)
         ctx = ToolContext(session=session, workspace_root=self._workspace_root)
@@ -68,13 +79,18 @@ class TurnEngine:
             await self._sessions.record(session, (user_message, *result.produced))
         except NewbotError as exc:
             await self._hub.publish(TurnFailed(session=session, message=str(exc)))
-            return
-        if result.message.content:
-            await self._hub.emit(
-                OutboundEnvelope(
-                    transport=session.transport,
-                    conversation_id=session.conversation,
-                    text=result.message.content,
+            return TurnStatus.FAILED
+        if envelope.reply and result.message.content:
+            try:
+                await self._hub.emit(
+                    OutboundEnvelope(
+                        transport=session.transport,
+                        conversation_id=session.conversation,
+                        text=result.message.content,
+                    )
                 )
-            )
+            except NewbotError as exc:
+                await self._hub.publish(TurnFailed(session=session, message=str(exc)))
+                return TurnStatus.FAILED
         await self._hub.publish(TurnCompleted(session=session, status=result.status))
+        return result.status

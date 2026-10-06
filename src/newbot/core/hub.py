@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from newbot.domain.envelope import InboundEnvelope, OutboundEnvelope
+from newbot.domain.errors import TransportError
 from newbot.domain.events import AgentEvent
+from newbot.domain.turn import TurnStatus
 from newbot.ports.events import EventSink
 from newbot.ports.transports import InboundHandler, TransportPort
 
@@ -33,16 +35,23 @@ class EventHub:
         for sink in tuple(self._sinks):
             await sink.publish(event)
 
-    async def submit(self, envelope: InboundEnvelope) -> None:
-        """Accept inbound work from a transport."""
+    async def submit(self, envelope: InboundEnvelope) -> TurnStatus:
+        """Accept inbound work from a transport and report how it ended."""
         handler = self._inbound
         if handler is None:
             raise RuntimeError("no inbound handler bound to the hub")
-        await handler(envelope)
+        return await handler(envelope)
 
     async def emit(self, envelope: OutboundEnvelope) -> None:
-        """Deliver one outbound reply to its origin transport."""
+        """Deliver one outbound reply to its origin transport.
+
+        An origin transport that is not registered is a deliberate transport
+        failure, so the turn that produced the reply fails rather than raising
+        an unhandled error through the caller.
+        """
         transport = self._transports.get(envelope.transport)
         if transport is None:
-            raise RuntimeError(f"no transport registered for {envelope.transport!r}")
+            raise TransportError(
+                f"no transport registered for {envelope.transport!r}"
+            )
         await transport.deliver(envelope)

@@ -46,6 +46,7 @@ FORBIDDEN: dict[str, set[str]] = {
         "extensions",
     },
     "tools": {"core", "adapters", "app", "cli"},
+    "extensions": {"core", "adapters", "app", "cli", "tools", "session", "memory"},
     "adapters": {"core", "app", "cli"},
     "app": {"cli"},
 }

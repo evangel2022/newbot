@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +17,29 @@ class ToolContext:
 
     session: SessionKey
     workspace_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutput:
+    """A tool's raw output before registry normalization."""
+
+    text: str
+    is_error: bool = False
+
+
+class Tool(Protocol):
+    """A model-callable capability with a stable name/schema contract."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        """The model-facing spec (name, description, JSON schema)."""
+        ...
+
+    async def invoke(
+        self, arguments: Mapping[str, object], ctx: ToolContext
+    ) -> ToolOutput:
+        """Run the tool with validated arguments."""
+        ...
 
 
 class ToolRegistryPort(Protocol):

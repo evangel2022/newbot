@@ -5,13 +5,14 @@ from __future__ import annotations
 from typing import Protocol
 
 from newbot.domain.envelope import InboundEnvelope, OutboundEnvelope
+from newbot.domain.turn import TurnStatus
 
 
 class InboundHandler(Protocol):
     """Receives one inbound envelope; implemented by the turn engine."""
 
-    async def __call__(self, envelope: InboundEnvelope) -> None:
-        """Handle one inbound envelope."""
+    async def __call__(self, envelope: InboundEnvelope) -> TurnStatus:
+        """Handle one inbound envelope and report how its turn ended."""
         ...
 
 

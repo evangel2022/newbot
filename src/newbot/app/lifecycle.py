@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 from typing import TextIO
 
@@ -13,21 +14,27 @@ from newbot.adapters.stores.json_cursors import JsonCursors
 from newbot.adapters.stores.jsonl_journal import JsonlJournal
 from newbot.adapters.summarizers.provider import ProviderSummarizer
 from newbot.adapters.transports.cli import CliTransport
+from newbot.adapters.transports.connectors.telegram import TelegramConnector
 from newbot.adapters.transports.http_ws import WorkbenchServer
 from newbot.app.bootstrap import (
     Runtime,
     build_runtime,
     build_sessions,
+    build_trigger_queue,
     configured_secrets,
     resolve_workspace_root,
     vault_dir,
 )
+from newbot.app.cron import CronRunner
+from newbot.app.heartbeat import HEARTBEAT_FILE, read_active_tasks
 from newbot.app.scheduler import Job, Scheduler
-from newbot.config.schema import Settings
+from newbot.app.triggers import TriggerConsumer
+from newbot.config.schema import ScheduledTurn, Settings
 from newbot.domain.curation import CurationOutcome
 from newbot.domain.envelope import InboundEnvelope
-from newbot.domain.errors import NewbotError, VersionError
+from newbot.domain.errors import NewbotError, TriggerError, VersionError
 from newbot.domain.session import SessionKey
+from newbot.domain.turn import TurnStatus
 from newbot.memory.consolidator import Consolidator
 from newbot.memory.curator import Curator
 from newbot.memory.layout import MemoryLayout
@@ -40,10 +47,13 @@ _CONVERSATION_ID = "default"
 _EXIT_COMMANDS = frozenset({"/exit", "/quit"})
 _PROMPT = "you> "
 DEFAULT_KEEP_RECENT = 8
+_CRON_POLL_SECONDS = 1.0
 _COMMANDS_HELP = (
     "commands:\n"
     "  /compact  summarize older history into a checkpoint\n"
     "  /curate   fold new summaries into durable memory files\n"
+    "  /new      stop this session's tasks and start it over\n"
+    "  /stop     stop this session's running subagent tasks\n"
     "  /help     show this help\n"
     "  /exit     leave the session\n"
 )
@@ -58,7 +68,7 @@ async def run_once(
     stderr: TextIO | None = None,
 ) -> int:
     """Run a single turn on the CLI transport; return a process exit code."""
-    runtime = build_runtime(
+    runtime = await build_runtime(
         settings, provider_factory=provider_factory, stdout=stdout, stderr=stderr
     )
     try:
@@ -71,7 +81,8 @@ async def run_once(
         )
         await _auto_compact(settings, runtime, stderr=stderr)
     finally:
-        await runtime.provider.aclose()
+        await runtime.subagents.drain()
+        await runtime.aclose()
     return runtime.transport.exit_code
 
 
@@ -90,7 +101,7 @@ async def run_interactive(
     conversation). A line starting with ``/`` is a session command. A failed
     turn is reported and the loop continues.
     """
-    runtime = build_runtime(
+    runtime = await build_runtime(
         settings, provider_factory=provider_factory, stdout=stdout, stderr=stderr
     )
     prompt = sys.stdout if stdout is None else stdout
@@ -124,7 +135,8 @@ async def run_interactive(
             )
             await _auto_compact(settings, runtime, stderr=stderr)
     finally:
-        await runtime.provider.aclose()
+        await runtime.subagents.drain()
+        await runtime.aclose()
     return 0
 
 
@@ -147,6 +159,13 @@ async def _run_command(
         )
     elif command == "/curate":
         await _curate_memory(settings, stream=stream, provider_factory=provider_factory)
+    elif command in {"/new", "/stop"}:
+        reply = await runtime.commands.reply(
+            InboundEnvelope("cli", _CONVERSATION_ID, command)
+        )
+        if reply is not None:
+            stream.write(f"{reply}\n")
+            stream.flush()
     elif command == "/help":
         stream.write(_COMMANDS_HELP)
     else:
@@ -255,6 +274,22 @@ async def run_curate(
     return 0
 
 
+def _telegram_connector(
+    settings: Settings, *, stderr: TextIO | None
+) -> TelegramConnector | None:
+    """Build the configured chat channel, if one is enabled."""
+    channel = settings.channels.telegram
+    if not channel.enabled:
+        return None
+    return TelegramConnector(
+        token=channel.token,
+        api_base=channel.api_base,
+        allowed_chat_ids=channel.allowed_chat_ids,
+        poll_timeout_seconds=channel.poll_timeout_seconds,
+        stderr=sys.stderr if stderr is None else stderr,
+    )
+
+
 async def run_serve(
     settings: Settings,
     *,
@@ -264,13 +299,9 @@ async def run_serve(
 ) -> int:
     """Run the long-lived host: registered maintenance until shutdown."""
     stream = sys.stdout if stdout is None else stdout
-    runtime = build_runtime(
+    runtime = await build_runtime(
         settings, provider_factory=provider_factory, stdout=stdout, stderr=stderr
     )
-    scheduler = Scheduler()
-    interval = settings.schedule.curation_interval_seconds
-    if interval is not None:
-        scheduler.every(interval, _curation_job(settings, runtime.provider, stream))
     workbench = WorkbenchServer(
         port=settings.server.port,
         access=AccessPolicy(settings.server.token),
@@ -278,6 +309,36 @@ async def run_serve(
     )
     runtime.hub.register_transport(workbench)
     runtime.hub.subscribe(workbench)
+    scheduler = Scheduler()
+    interval = settings.schedule.curation_interval_seconds
+    if interval is not None:
+        scheduler.every(interval, _curation_job(settings, runtime.provider, stream))
+    for turn in settings.schedule.turns:
+        scheduler.every(
+            turn.every_seconds,
+            _turn_job(runtime, workbench.transport_id, turn, stderr=stderr),
+        )
+    if settings.triggers.items:
+        consumer = TriggerConsumer(
+            build_trigger_queue(settings),
+            transport=workbench.transport_id,
+            submit=runtime.hub.submit,
+        )
+        scheduler.every(settings.triggers.poll_interval_seconds, _trigger_job(consumer))
+    if settings.heartbeat.enabled:
+        scheduler.every(
+            settings.heartbeat.interval_seconds,
+            _heartbeat_job(runtime, workbench.transport_id, settings, stderr=stderr),
+        )
+    scheduler.every(
+        _CRON_POLL_SECONDS,
+        _cron_job(CronRunner(runtime.jobs, submit=runtime.hub.submit, stderr=stderr)),
+    )
+    connector = _telegram_connector(settings, stderr=stderr)
+    connector_task: asyncio.Task[None] | None = None
+    if connector is not None:
+        runtime.hub.register_transport(connector)
+        connector_task = asyncio.create_task(connector.run(runtime.hub.submit))
     workbench.start(asyncio.get_running_loop())
     stream.write("serving\n")
     stream.write(f"health {workbench.url}\n")
@@ -285,8 +346,15 @@ async def run_serve(
     try:
         await scheduler.run()
     finally:
+        if connector_task is not None:
+            connector_task.cancel()
         await asyncio.to_thread(workbench.stop)
-        await runtime.provider.aclose()
+        if connector is not None:
+            await connector.aclose()
+        await runtime.aclose()
+        if connector_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await connector_task
     return 0
 
 
@@ -327,6 +395,134 @@ def _curation_job(settings: Settings, provider: ProviderPort, stream: TextIO) ->
         stream.flush()
 
     return job
+
+
+def _turn_job(
+    runtime: Runtime, transport: str, turn: ScheduledTurn, *, stderr: TextIO | None
+) -> Job:
+    """Build the scheduled job that runs one turn in its bound conversation.
+
+    The turn is recorded to its origin session and delivered through the hub to
+    the origin transport. A deliberate failure is reported to the operator and
+    the next tick still runs.
+    """
+
+    async def job() -> None:
+        try:
+            status = await runtime.hub.submit(
+                InboundEnvelope(
+                    transport=transport,
+                    conversation_id=turn.conversation,
+                    text=turn.prompt,
+                )
+            )
+        except NewbotError as exc:
+            stream = sys.stderr if stderr is None else stderr
+            stream.write(f"warning: scheduled turn failed: {exc}\n")
+            stream.flush()
+            return
+        if status is TurnStatus.FAILED:
+            stream = sys.stderr if stderr is None else stderr
+            stream.write("warning: scheduled turn failed: turn failed\n")
+            stream.flush()
+
+    return job
+
+
+def _trigger_job(consumer: TriggerConsumer) -> Job:
+    """Build the poll job that delivers queued local triggers."""
+
+    async def job() -> None:
+        await consumer.consume()
+
+    return job
+
+
+def _cron_job(runner: CronRunner) -> Job:
+    """Build the poll job that dispatches due scheduled jobs."""
+
+    async def job() -> None:
+        await runner.dispatch()
+
+    return job
+
+
+def _heartbeat_job(
+    runtime: Runtime, transport: str, settings: Settings, *, stderr: TextIO | None
+) -> Job:
+    """Build the job that runs workspace heartbeat tasks without notifying anyone.
+
+    The turn is recorded to the heartbeat conversation so a later run can compare
+    against it, but nothing is delivered: v1 has no notification gate, so a
+    heartbeat stays silent by contract (ADR-019).
+    """
+    path = resolve_workspace_root(settings) / HEARTBEAT_FILE
+
+    def warn(message: str) -> None:
+        stream = sys.stderr if stderr is None else stderr
+        stream.write(f"{message}\n")
+        stream.flush()
+
+    async def job() -> None:
+        try:
+            tasks = read_active_tasks(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            warn(f"warning: heartbeat file unreadable: {exc}")
+            return
+        if not tasks:
+            return
+        bullets = "\n".join(f"- {task}" for task in tasks)
+        text = f"Heartbeat check. Perform these workspace tasks:\n{bullets}"
+        try:
+            status = await runtime.hub.submit(
+                InboundEnvelope(
+                    transport=transport,
+                    conversation_id=settings.heartbeat.conversation,
+                    text=text,
+                    reply=False,
+                )
+            )
+        except NewbotError as exc:
+            warn(f"warning: heartbeat turn failed: {exc}")
+            return
+        if status is TurnStatus.FAILED:
+            warn("warning: heartbeat turn failed: turn failed")
+
+    return job
+
+
+async def run_trigger(
+    settings: Settings,
+    trigger_id: str,
+    text: str,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
+    """Queue one local-trigger delivery for the running (or next) host."""
+    stream = sys.stdout if stdout is None else stdout
+    error = sys.stderr if stderr is None else stderr
+    definition = next(
+        (item for item in settings.triggers.items if item.id == trigger_id), None
+    )
+    if definition is None:
+        error.write(f"error: unknown trigger {trigger_id!r}\n")
+        error.flush()
+        return 2
+    if not text.strip():
+        error.write("error: message must not be empty\n")
+        error.flush()
+        return 2
+    queue = build_trigger_queue(settings)
+    try:
+        delivery_id = queue.enqueue(trigger_id, definition.conversation, text)
+    except TriggerError as exc:
+        error.write(f"error: {exc}\n")
+        error.flush()
+        return 1
+    stream.write(f"queued {delivery_id}\n")
+    stream.flush()
+    return 0
 
 
 async def run_memory_log(settings: Settings, *, stdout: TextIO | None = None) -> int:

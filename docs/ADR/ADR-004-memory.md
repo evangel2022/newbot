@@ -28,11 +28,9 @@ Separate memory into tiers with distinct guarantees and a bridge between them.
   durable files and makes the smallest coherent edits to the durable files. It is interpretive,
   not a rewrite.
 - **Versioning.** Curation writes are recorded through `VersioningPort` so the operator can
-  inspect, diff, and restore, and one pass is grouped as a single revertible change-set. The
-  default adapter is a file-system vault.
-- **Inspection commands.** `newbot curate` reports its change-set; `newbot memory log`,
-  `newbot memory restore <version>`, and `newbot memory revert-set <change-set>` expose the
-  process.
+  inspect, diff, and restore. The default adapter is a file-system vault.
+- **Inspection commands.** `/compact`, `/curate`, `/curate-log`, `/curate-restore`,
+  `/curate-guide` expose the process.
 - **Sanitization.** Journal entries and durable files are bounded and sanitized at write time
   (C7): no raw tool echoes, unbounded metadata, or local paths that teach the model to imitate
   internal markers.

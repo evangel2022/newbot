@@ -51,3 +51,31 @@ class CurationError(NewbotError):
 
 class TransportError(NewbotError):
     """A transport could not start, deliver, or shut down."""
+
+
+class TriggerError(NewbotError):
+    """A trigger delivery could not be validated, queued, or recorded."""
+
+
+class CronError(NewbotError):
+    """A scheduled job could not be validated, stored, or dispatched."""
+
+
+class McpError(NewbotError):
+    """An MCP server could not start, speak the protocol, or answer a call."""
+
+
+class SkillError(NewbotError):
+    """A workspace skill could not be read, parsed, or validated."""
+
+
+class ExtensionError(NewbotError):
+    """A discovered tool extension could not be loaded or validated."""
+
+
+class PluginError(NewbotError):
+    """An Agent Plugin package could not be discovered, validated, or merged."""
+
+
+class SubagentError(NewbotError):
+    """A subagent task record could not be stored or read."""

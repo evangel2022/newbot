@@ -7,3 +7,17 @@ __pycache__/
 build/
 dist/
 .venv/
+
+# coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# local environment / secrets
+.env
+.env.*
+
+# IDEs
+.idea/
+.vscode/
